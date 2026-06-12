@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Конструктор рассылок — ZeroCoder</title>
+  <link rel="stylesheet" href="/static/style.css?v=6">
+</head>
+<body>
+
+  <header class="app-header">
+    <div class="header-icon"><img src="/static/cat_icon.png" class="cat-icon" alt=""></div>
+    <h1>Конструктор рассылок</h1>
+    <div class="zc-logo">
+      <img src="/static/logo.png" class="zc-icon" alt="Зерокодер">
+      <span class="zc-text">Зерокодер</span>
+    </div>
+  </header>
+
+  <main class="app-layout">
+
+    <!-- ====== LEFT PANEL: Settings ====== -->
+    <aside class="settings-panel">
+
+      <section class="settings-section">
+        <label class="section-label">Google Doc URL</label>
+        <input type="url" id="docUrl" placeholder="https://docs.google.com/document/d/...">
+      </section>
+
+      <section class="settings-section">
+        <label class="section-label">UTM параметры</label>
+        <input type="text" id="utmCampaign" placeholder="Тег активности (utm_campaign)">
+        <input type="text" id="utmDate" placeholder="Дата (дд.мм.гг)" style="margin-top:8px">
+      </section>
+
+      <section class="settings-section">
+        <label class="section-label">Изображения (URL)</label>
+        <div id="imageFields">
+          <div class="image-field">
+            <input type="url" placeholder="URL картинки 1">
+            <button class="remove-btn" onclick="removeImageField(this)" title="Удалить">✕</button>
+          </div>
+        </div>
+        <button class="add-btn" onclick="addImageField()">+ добавить картинку</button>
+      </section>
+
+      <section class="settings-section">
+        <label class="section-label">Каналы рассылки</label>
+        <div class="channels-list">
+          {% for key, ch in channels.items() %}
+          <label class="channel-checkbox">
+            <input type="checkbox" name="channel" value="{{ key }}"
+              {% if key in ['email', 'tg_gc', 'tg_voronki', 'neurocat'] %}checked{% endif %}>
+            <span>{{ ch.name }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <button class="generate-btn" onclick="generateAll()">⚡ Сгенерировать</button>
+
+    </aside>
+
+    <!-- ====== RIGHT PANEL: Output ====== -->
+    <section class="output-panel">
+
+      <!-- Subject / Preview meta fields -->
+      <div class="meta-fields" id="metaFields" style="display:none">
+        <div class="meta-field">
+          <label>Тема письма</label>
+          <div class="meta-input-row">
+            <input type="text" id="subjectField" readonly placeholder="Тема появится здесь">
+            <button class="copy-meta-btn" onclick="copyField('subjectField')" title="Скопировать">📋</button>
+          </div>
+        </div>
+        <div class="meta-field">
+          <label>Прехедер / Превью</label>
+          <div class="meta-input-row">
+            <input type="text" id="previewField" readonly placeholder="Прехедер появится здесь">
+            <button class="copy-meta-btn" onclick="copyField('previewField')" title="Скопировать">📋</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dynamic tab bar (built by JS after generation) -->
+      <div class="output-tabs" id="outputTabs">
+        <button class="tab-btn active" data-panel="utm" onclick="switchTabPanel('utm', this)">🔗 UTM</button>
+      </div>
+
+      <!-- Dynamic channel panels (built by JS after generation) -->
+      <div id="channelPanels" class="panels-wrapper"></div>
+
+      <!-- UTM panel (always present, static) -->
+      <div id="panel-utm" class="tab-content active">
+        <div class="utm-generator">
+          <div class="utm-input-row">
+            <input type="url" id="utmBaseUrl" placeholder="Базовая ссылка для UTM (https://sites.zerocoder.ru/...)">
+            <button class="toolbar-btn primary-btn" onclick="generateUTM()">Сгенерировать UTM</button>
+          </div>
+          <div id="utmResults" class="utm-results"></div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <script src="/static/app.js?v=14"></script>
+</body>
+</html>

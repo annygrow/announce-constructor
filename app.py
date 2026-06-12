@@ -1,0 +1,1795 @@
+import re
+import requests
+from flask import Flask, request, jsonify, render_template
+from bs4 import BeautifulSoup, NavigableString, Tag
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote, quote
+from config import CHANNELS, LOGO_URL, SITE_URL, PHONE, LEGAL_NOTICE
+
+app = Flask(__name__)
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+@app.after_request
+def no_cache_static(response):
+    if request.path.startswith('/static/'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+    return response
+
+# ---------------------------------------------------------------------------
+# Email HTML template pieces
+# ---------------------------------------------------------------------------
+
+EMAIL_WRAPPER_START = '''<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<title>{subject}</title>
+<style type="text/css">
+body {{ margin:0; padding:0; background-color:#F6F6F6; }}
+img {{ border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; }}
+a {{ text-decoration:none; }}
+@media only screen and (max-width:600px) {{
+  .es-content-body {{ width:100% !important; }}
+  .es-footer-body {{ width:100% !important; }}
+  .es-left, .es-right {{ float:none !important; width:100% !important; }}
+  .esdev-mso-td {{ display:block !important; width:100% !important; }}
+  .esdev-mso-table {{ width:100% !important; }}
+  .es-col-2, .es-col-3 {{ display:block !important; width:100% !important; padding:5px 0 !important; }}
+  .es-col-img {{ max-width:200px !important; width:auto !important; display:block; margin:0 auto; }}
+}}
+</style>
+</head>
+<body style="margin:0;padding:0;background-color:#F6F6F6">
+<table class="es-wrapper" cellspacing="0" cellpadding="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;padding:0;margin:0;width:100%;height:100%;background-color:#F6F6F6">
+<tr><td valign="top" style="padding:0;margin:0">'''
+
+EMAIL_HEADER = '''
+<table cellpadding="0" cellspacing="0" align="center" role="none" style="border-collapse:collapse;border-spacing:0;width:600px;background-color:#f6f6f6">
+<tr><td align="left" bgcolor="#f6f6f6" style="padding:0 20px;margin:0;background-color:#f6f6f6">
+<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">
+<tr><td align="center" style="padding:10px;margin:0;font-size:0px">
+<a href="https://zerocoder.ru/" target="_blank">
+<img src="{logo_url}" alt="ZeroCoder" width="220" style="display:block;border:0;max-width:220px">
+</a>
+</td></tr>
+</table></td></tr>
+</table>
+'''
+
+EMAIL_FOOTER = '''
+<table class="es-footer-body" cellspacing="0" cellpadding="0" align="center" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#333333;width:600px">
+<tr><td align="left" style="padding:20px 20px 10px;margin:0">
+<table cellpadding="0" cellspacing="0" class="es-left" align="left" role="none" style="border-collapse:collapse;border-spacing:0;float:left;width:270px">
+<tr><td align="left" style="padding:0;margin:0;width:270px">
+<table cellpadding="0" cellspacing="0" width="100%" role="presentation" style="border-collapse:collapse;border-spacing:0">
+<tr><td align="left" style="padding:0;margin:0">
+<p style="margin:0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:21px;color:#FFFFFF;font-size:14px">Остались вопросы? Мы готовы помочь! Просто ответьте на это письмо.</p>
+</td></tr>
+<tr><td align="left" style="padding:10px 5px 20px 0;margin:0">
+<p style="margin:0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:21px;color:#FFFFFF;font-size:14px">8-999-333-69-78</p>
+</td></tr>
+</table></td></tr>
+</table>
+<table cellpadding="0" cellspacing="0" class="es-right" align="right" role="none" style="border-collapse:collapse;border-spacing:0;float:right;width:270px">
+<tr><td align="left" style="padding:0;margin:0;width:270px">
+<table cellpadding="0" cellspacing="0" width="100%" role="presentation" style="border-collapse:collapse;border-spacing:0">
+<tr><td align="right" style="padding:0;margin:0">
+<p style="margin:0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:21px;color:#FFFFFF;font-size:14px"><a href="https://zerocoder.ru/" style="color:#FFFFFF;text-decoration:underline">https://zerocoder.ru/</a></p>
+</td></tr>
+<tr><td align="right" style="padding:20px 0 0;margin:0;font-size:0">
+<table cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;border-spacing:0">
+<tr>
+<td align="center" valign="top" style="padding:0 10px 0 0;margin:0"><a target="_blank" href="https://university.zerocoder.ru/wa" style="color:#FFFFFF"><img src="https://ifcna.stripocdnplugin.email/content/assets/img/messenger-icons/logo-white/whatsapp-logo-white.png" alt="Whatsapp" width="32" height="32" style="display:block;border:0"></a></td>
+<td align="center" valign="top" style="padding:0;margin:0"><a target="_blank" href="https://university.zerocoder.ru/wa" style="color:#FFFFFF"><img src="https://ifcna.stripocdnplugin.email/content/assets/img/messenger-icons/logo-white/telegram-logo-white.png" alt="Telegram" width="32" height="32" style="display:block;border:0"></a></td>
+</tr>
+</table></td></tr>
+</table></td></tr>
+</table>
+</td></tr>
+</table>
+'''
+
+EMAIL_WRAPPER_END = '''
+</td></tr>
+</table>
+</body>
+</html>'''
+
+# ---------------------------------------------------------------------------
+# Email block helpers
+# ---------------------------------------------------------------------------
+
+def block_white(paragraphs_html):
+    return (
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;margin:0;background-color:#ffffff">\n'
+        + paragraphs_html
+        + '\n</td></tr>'
+    )
+
+def block_grey(paragraphs_html):
+    return (
+        '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+        '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #f0f1f3;border-radius:20px" role="presentation">\n'
+        '<tr><td align="left" bgcolor="#f0f1f3" style="padding:10px 15px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#333333">\n'
+        + paragraphs_html
+        + '\n</td></tr>\n</table></td></tr>'
+    )
+
+def block_dotted(paragraphs_html):
+    return (
+        '<tr><td style="padding:10px;margin:0;background-color:#ffffff">\n'
+        '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:3px dashed #1544ed;border-radius:13px" role="presentation">\n'
+        '<tr><td align="left" style="padding:15px 10px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#333333">\n'
+        + paragraphs_html
+        + '\n</td></tr>\n</table></td></tr>'
+    )
+
+def block_blue_cta(text_html, button_url, button_text):
+    return (
+        '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+        '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
+        '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px 5px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#ffffff">\n'
+        + text_html
+        + '\n</td></tr>\n'
+        '<tr><td align="center" bgcolor="#1445ea" style="padding:10px 0 15px;margin:0">\n'
+        f'<a href="{button_url}" target="_blank" style="background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;text-decoration:none;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:16px;display:inline-block;font-weight:600">{button_text}</a>\n'
+        '</td></tr>\n</table></td></tr>'
+    )
+
+def block_image_center(image_url):
+    return (
+        '<tr><td align="center" bgcolor="#ffffff" style="padding:10px 20px;margin:0;background-color:#ffffff;font-size:0px">\n'
+        f'<img src="{image_url}" alt="" width="560" style="display:block;border:0;max-width:100%;border-radius:10px">\n'
+        '</td></tr>'
+    )
+
+def block_blue_text(paragraphs_html):
+    """Blue block without a CTA button."""
+    return (
+        '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+        '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
+        '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#ffffff">\n'
+        + paragraphs_html
+        + '\n</td></tr>\n</table></td></tr>'
+    )
+
+def block_button(btn_url, btn_text):
+    """Standalone button on white background, centered."""
+    btn_style = (
+        "background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
+        "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+        "font-size:16px;display:inline-block;font-weight:600"
+    )
+    return (
+        '<tr><td align="center" bgcolor="#ffffff" style="padding:8px 20px;background-color:#ffffff">\n'
+        f'<a href="{btn_url}" target="_blank" style="{btn_style}">{btn_text}</a>\n'
+        '</td></tr>'
+    )
+
+def block_spacer(height=20):
+    """Vertical spacer between blocks."""
+    return (
+        f'<tr><td height="{height}" style="height:{height}px;font-size:1px;line-height:1px;'
+        f'background-color:#ffffff">&nbsp;</td></tr>'
+    )
+
+def block_2col_img_text(image_url, text_html):
+    """Two-column block: image left, text right."""
+    col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
+    return (
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
+        '<tr>\n'
+        '<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%">\n'
+        f'<img src="{image_url}" alt="" class="es-col-img" style="display:block;border:0;width:100%;max-width:260px;border-radius:8px">\n'
+        '</td>\n'
+        f'<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%;{col_style}">\n'
+        + text_html
+        + '\n</td>\n</tr>\n</table>\n</td></tr>'
+    )
+
+def block_2col_text_img(text_html, image_url):
+    """Two-column block: text left, image right."""
+    col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
+    return (
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
+        '<tr>\n'
+        f'<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%;{col_style}">\n'
+        + text_html
+        + '\n</td>\n'
+        '<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%">\n'
+        f'<img src="{image_url}" alt="" class="es-col-img" style="display:block;border:0;width:100%;max-width:260px;border-radius:8px">\n'
+        '</td>\n</tr>\n</table>\n</td></tr>'
+    )
+
+def block_2col_text_text(left_html, right_html):
+    """Two equal text columns."""
+    col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
+    return (
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
+        '<tr>\n'
+        f'<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%;{col_style}">\n'
+        + left_html
+        + f'\n</td>\n<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%;{col_style}">\n'
+        + right_html
+        + '\n</td>\n</tr>\n</table>\n</td></tr>'
+    )
+
+def block_3col_text(col1_html, col2_html, col3_html):
+    """Three equal text columns, each styled as a grey box."""
+    inner_style = "padding:12px 14px;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:14px;line-height:20px;color:#333333"
+    box_style = "border-collapse:separate;border-spacing:0;width:100%;height:100%;background-color:#f5f5f5;border-radius:8px"
+
+    def col_box(html, outer_pad):
+        return (
+            f'<td class="es-col-3" align="left" valign="top" style="{outer_pad};width:33%;height:100%">\n'
+            f'<table cellpadding="0" cellspacing="0" role="presentation" width="100%" height="100%" style="{box_style}">\n'
+            f'<tr><td valign="top" style="{inner_style}">\n{html}\n</td></tr></table>\n</td>'
+        )
+
+    return (
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
+        '<tr>\n'
+        + col_box(col1_html, 'padding-right:6px')
+        + '\n'
+        + col_box(col2_html, 'padding:0 3px')
+        + '\n'
+        + col_box(col3_html, 'padding-left:6px')
+        + '\n</tr>\n</table>\n</td></tr>'
+    )
+
+def make_p(text, bold=False, italic=False, font_size=18, color='#333333'):
+    style = (
+        f"margin:0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+        f"line-height:27px;color:{color};font-size:{font_size}px"
+    )
+    content = text
+    if bold:
+        content = f'<b>{content}</b>'
+    if italic:
+        content = f'<i>{content}</i>'
+    return f'<p style="{style}">{content}</p>'
+
+# ---------------------------------------------------------------------------
+# URL / UTM helpers
+# ---------------------------------------------------------------------------
+
+def decode_google_redirect(url):
+    """Unwrap https://www.google.com/url?q=ACTUAL_URL"""
+    if 'google.com/url' in url:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        if 'q' in qs:
+            return unquote(qs['q'][0])
+    return url
+
+def is_gc_variable(url):
+    """Check if a string is a GC template variable like {offer_url_...} or {first_name}"""
+    return bool(re.match(r'^\{[^}]+\}$', url.strip()))
+
+def build_utm_url(url, channel_key, campaign, date):
+    """Inject UTM parameters into a URL. Preserves GC variables unchanged."""
+    if not url:
+        return url
+    url = url.strip()
+    if is_gc_variable(url):
+        return url
+    if not url.startswith('http'):
+        return url
+
+    url = decode_google_redirect(url)
+    ch = CHANNELS.get(channel_key, {})
+
+    try:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+
+        if ch.get('source'):
+            params['utm_source'] = [ch['source']]
+        if ch.get('medium'):
+            params['utm_medium'] = [ch['medium']]
+        if campaign:
+            params['utm_campaign'] = [campaign]
+        if ch.get('content'):
+            params['utm_content'] = [ch['content']]
+        if date:
+            params['utm_term'] = [date]
+
+        new_query = urlencode({k: v[0] for k, v in params.items()})
+        return urlunparse(parsed._replace(query=new_query))
+    except Exception:
+        return url
+
+def inject_utm_in_html(html_text, channel_key, campaign, date, footnote_links=None):
+    """
+    Replace all href="..." values in an HTML string with UTM-injected versions.
+    Also replaces footnote anchors [a], [b] etc. with resolved URLs.
+    """
+    footnote_map = {}
+    if footnote_links:
+        for link in footnote_links:
+            footnote_map[link.get('label', '')] = link.get('url', '')
+
+    def replace_href(match):
+        raw = match.group(1)
+        if is_gc_variable(raw):
+            return match.group(0)
+        decoded = decode_google_redirect(raw)
+        utmified = build_utm_url(decoded, channel_key, campaign, date)
+        return f'href="{utmified}"'
+
+    result = re.sub(r'href="([^"]*)"', replace_href, html_text)
+    return result
+
+# ---------------------------------------------------------------------------
+# Google Doc fetching & parsing
+# ---------------------------------------------------------------------------
+
+def extract_doc_id(url):
+    m = re.search(r'docs\.google\.com/document/d/([a-zA-Z0-9_-]+)', url)
+    if m:
+        return m.group(1)
+    return None
+
+def fetch_google_doc_html(doc_id):
+    export_url = f'https://docs.google.com/document/d/{doc_id}/export?format=html'
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Safari/537.36'
+        )
+    }
+    resp = requests.get(export_url, headers=headers, allow_redirects=True, timeout=30)
+    resp.raise_for_status()
+    return resp.text
+
+def get_text_content(tag):
+    """Get plain text from a BS4 tag, collapsing whitespace."""
+    return ' '.join(tag.get_text(' ', strip=True).split())
+
+def is_section_header(tag):
+    """
+    Returns the section key if this tag is a section divider, else None.
+    Matches any short <p>, <li>, or heading that contains section keywords —
+    no bold-only requirement, because Google Docs section headers export as
+    plain paragraphs or numbered list items.
+    """
+    tag_name = tag.name if tag.name else ''
+    if tag_name not in ('h1', 'h2', 'h3', 'h4', 'p', 'li'):
+        return None
+
+    # Tags inside HTML tables are channel-config cells, never section headers
+    if tag.find_parent('table'):
+        return None
+
+    text = get_text_content(tag).lower().strip()
+    if not text:
+        return None
+
+    # Section headers are short labels, not body sentences
+    if len(text) > 120:
+        return None
+
+    # Skip rows that are clearly channel entries or service addresses
+    skip_kw = ['care@', '@zerocoder', 'getcourse', 'unisender', 'bot (', 'бот (',
+               'zerocoder_bot', 'zerocoder.ru', 'newcat.zerocoder']
+    if any(s in text for s in skip_kw):
+        return None
+
+    email_kw = ['контент письма', 'текст письма', 'текст:', 'текст для почты',
+                'почта:', 'почта (', '3.контент', '3. контент', 'e-mail:', 'письмо:',
+                'для почты', 'email:',
+                # Group separators: start a new email variant (and later TG variant within them)
+                # "Другие источники" contains Unisender email + Voronki TG content
+                'другие источники', 'другие каналы', 'другой источник', 'другие боты',
+                'другой текст']
+    tg_kw = ['телеграм/max', 'телеграм/макс', 'telegram/max', 'тг/max', 'тг/макс', 'тг+max',
+             'телеграм бот', 'тг бот', 'текст для тг', 'для телеграм', 'для тг',
+             'телеграм (', 'тг (', 'тг:', 'тг+мax',
+             'телеграм воронки', 'тг воронки', 'для воронки']
+    tg_only_kw = ['телеграм:', 'telegram:']
+    subject_kw = ['тема письма', 'тема:', 'subject:']
+    preview_kw = ['превью:', 'прехедер:', 'preview:', 'preheader:']
+    meta_kw = ['кампания:', 'каналы ', 'каналы(', 'сегмент ', 'сегмент(',
+               'исключаем', 'включаем', 'от кого:', 'from:']
+
+    # Meta-content labels: skip entirely (neither section header nor content)
+    meta_label_kw = ['от лица ', 'от лица:', 'в 1 клик', 'в 2 клик', 'в один клик',
+                     'обычная рассылка', 'ссылки:', 'список ссылок']
+    if any(text.startswith(kw) for kw in meta_label_kw):
+        return 'skip'
+    if text in ('ссылки',):
+        return 'skip'
+
+    # Skip meta-section headers (campaign, channels, segments, sender info)
+    if any(text.startswith(kw) or text == kw.rstrip(':') for kw in meta_kw):
+        return 'skip'
+
+    # Standalone TG section headers — single-word only, exact match to avoid false positives
+    tg_exact = {'телеграм', 'telegram', 'тг', 'tg', 'max', 'instagram', 'push', 'youtube',
+                'инстаграм', 'ютуб', 'нейрокот', 'помощник'}
+    if text in tg_exact:
+        return 'tg_section'
+
+    # Skip standalone single-word channel-type labels that appear in config tables
+    if text in ('email', 'telegram/max', 'приложение'):
+        return None
+
+    for kw in subject_kw:
+        if text.startswith(kw) or kw in text:
+            return 'subject'
+    for kw in preview_kw:
+        if text.startswith(kw) or kw in text:
+            return 'preview'
+    for kw in email_kw:
+        if kw in text:
+            return 'email_section'
+    for kw in tg_kw:
+        if kw in text:
+            return 'tg_section'
+    for kw in tg_only_kw:
+        if text.startswith(kw):
+            return 'tg_section'
+
+    return None
+
+def extract_footnotes(soup):
+    """
+    Extract footnote links from a Google Docs HTML export.
+    Returns:
+      footnotes: list of {'label': 'a', 'url': '...', 'text': '...'}
+      cmnt_url_map: dict {cmnt_id: url} for resolving inline comment references
+    """
+    footnotes = []
+    cmnt_url_map = {}
+
+    # Google Docs exports comment/annotation links as:
+    # <div class="..."><p><a href="#cmnt_refN" id="cmntN">[letter]</a><span>url or {var}</span></p></div>
+    # Body text references them via: <sup><a href="#cmntN" id="cmnt_refN">[letter]</a></sup>
+    for a_tag in soup.find_all('a', id=re.compile(r'^cmnt\d')):
+        cmnt_id = a_tag.get('id', '')  # e.g. "cmnt1", "cmnt4"
+        label_text = a_tag.get_text(strip=True)  # e.g. "[a]", "[d]"
+        label_m = re.match(r'^\[([a-zA-Z0-9]+)\]$', label_text)
+        if not label_m:
+            continue
+        label = label_m.group(1)
+        # URL/variable is in the immediately-following sibling element or span
+        next_sib = a_tag.next_sibling
+        url_text = ''
+        if next_sib is not None:
+            if hasattr(next_sib, 'get_text'):
+                url_text = next_sib.get_text(strip=True)
+            else:
+                url_text = str(next_sib).strip()
+        url_m = re.search(r'(https?://\S+|\{[a-zA-Z_][^}]*\})', url_text)
+        if url_m:
+            url = decode_google_redirect(url_m.group(1).rstrip('.,)'))
+            footnotes.append({'label': label, 'url': url, 'text': label_text + ' ' + url_text})
+            cmnt_url_map[cmnt_id] = url
+
+    # Fallback: classic Google Docs footnotes in <div id="ftn..."> containers
+    if not footnotes:
+        for div in soup.find_all('div', id=re.compile(r'^ftn')):
+            text = get_text_content(div)
+            label_m = re.search(r'\[([a-zA-Z0-9]+)\]', text)
+            label = label_m.group(1) if label_m else str(len(footnotes) + 1)
+            for a in div.find_all('a', href=True):
+                url = decode_google_redirect(a['href'])
+                footnotes.append({'label': label, 'url': url, 'text': text.strip()})
+
+    return footnotes, cmnt_url_map
+
+
+def resolve_comment_refs(html_str, cmnt_url_map):
+    """
+    Pre-process HTML: for each <sup><a href="#cmntN">[x]</a></sup> pattern,
+    wrap the immediately-preceding sibling text/span with <a href="url">.
+    Removes the <sup> marker after wrapping.
+    """
+    if not cmnt_url_map or not html_str:
+        return html_str
+
+    soup = BeautifulSoup(html_str, 'lxml')
+    body = soup.find('body') or soup
+
+    for sup in body.find_all('sup'):
+        a_tag = sup.find('a', href=re.compile(r'^#cmnt'))
+        if not a_tag:
+            continue
+        ref = a_tag.get('href', '').lstrip('#')  # e.g. "cmnt4"
+        url = cmnt_url_map.get(ref)
+        if not url:
+            continue
+
+        # Find the immediately preceding sibling node
+        prev = sup.previous_sibling
+        if prev is None:
+            sup.decompose()
+            continue
+
+        if isinstance(prev, NavigableString):
+            # Wrap the text node in <a>
+            new_a = soup.new_tag('a', href=url)
+            prev.replace_with(new_a)
+            new_a.string = str(prev)
+        elif hasattr(prev, 'name') and prev.name in ('span', 'b', 'strong', 'i', 'em'):
+            prev.wrap(soup.new_tag('a', href=url))
+
+        sup.decompose()
+
+    # Return just the body's inner HTML
+    body = soup.find('body')
+    return ''.join(str(c) for c in body.children) if body else html_str
+
+def extract_all_links(soup):
+    """
+    Collect all unique hrefs from the doc body (excluding footnote divs,
+    navigation, and Google redirect wrappers).
+    Returns list of unique resolved URLs.
+    """
+    links = []
+    seen = set()
+    for a in soup.find_all('a', href=True):
+        raw = a['href']
+        if not raw or raw.startswith('#'):
+            continue
+        resolved = decode_google_redirect(raw)
+        if resolved not in seen:
+            seen.add(resolved)
+            links.append({'url': resolved, 'text': a.get_text(strip=True)})
+    return links
+
+def inline_gdoc_formatting(soup):
+    """
+    Google Docs HTML uses CSS class-based formatting (e.g. .c3 {font-weight:700}).
+    Extract those rules and apply them as inline styles so downstream parsers can detect them.
+    """
+    style_tag = soup.find('style')
+    if not style_tag:
+        return
+
+    css_text = style_tag.get_text()
+    bold_cls, italic_cls, center_cls, right_cls = set(), set(), set(), set()
+
+    for selector, props in re.findall(r'(\.[\w-]+)\s*\{([^}]+)\}', css_text):
+        cls = selector[1:]
+        p = props.lower().replace(' ', '')
+        if 'font-weight:700' in p or 'font-weight:bold' in p:
+            bold_cls.add(cls)
+        if 'font-style:italic' in p:
+            italic_cls.add(cls)
+        if 'text-align:center' in p:
+            center_cls.add(cls)
+        if 'text-align:right' in p:
+            right_cls.add(cls)
+
+    if not (bold_cls or italic_cls or center_cls or right_cls):
+        return
+
+    for tag in soup.find_all(True):
+        classes = tag.get('class', [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        if not classes:
+            continue
+        existing = tag.get('style', '')
+        additions = []
+        if any(c in bold_cls for c in classes) and 'font-weight' not in existing:
+            additions.append('font-weight:700')
+        if any(c in italic_cls for c in classes) and 'font-style' not in existing:
+            additions.append('font-style:italic')
+        if any(c in center_cls for c in classes) and 'text-align' not in existing:
+            additions.append('text-align:center')
+        elif any(c in right_cls for c in classes) and 'text-align' not in existing:
+            additions.append('text-align:right')
+        if additions:
+            sep = ';' if existing and not existing.endswith(';') else ''
+            tag['style'] = existing + sep + ';'.join(additions)
+
+
+def parse_doc_html(html_content):
+    """
+    Parse Google Docs exported HTML and return structured content dict:
+    {
+      'email_text': <BeautifulSoup section or None>,
+      'tg_text':    <BeautifulSoup section or None>,
+      'subject':    str,
+      'preview':    str,
+      'links':      [...],
+      'footnotes':  [...],
+      'raw_paragraphs': [all p tags],
+    }
+    But we return serialised HTML strings, not soup objects, for JSON serialisation.
+    """
+    soup = BeautifulSoup(html_content, 'lxml')
+    inline_gdoc_formatting(soup)
+    body = soup.find('body') or soup
+
+    footnotes, cmnt_url_map = extract_footnotes(soup)
+    all_links = extract_all_links(soup)
+
+    sections = {
+        'other': [],
+    }
+    email_subsections = []  # list of {'name': str, 'blocks': []}
+    tg_subsections = []     # list of {'name': str, 'blocks': []}
+
+    current_section = 'other'
+    subject = ''
+    preview = ''
+
+    def process_block(tag):
+        nonlocal current_section, subject, preview
+        section_type = is_section_header(tag)
+
+        if section_type == 'skip':
+            return
+
+        if section_type == 'email_section':
+            name = get_text_content(tag).strip()
+            # Trim "От кого: ..." suffix from sub-variant names
+            name = re.sub(r'\s+от кого.*', '', name, flags=re.IGNORECASE).strip()
+            email_subsections.append({'name': name[:50], 'blocks': []})
+            current_section = 'email_section'
+            return
+        if section_type == 'tg_section':
+            tg_subsections.append({'name': get_text_content(tag).strip(), 'blocks': []})
+            current_section = 'tg_section'
+            return
+        if section_type == 'subject':
+            # Extract text after the keyword from the tag itself
+            raw = get_text_content(tag).strip()
+            extracted = re.sub(r'^[^:]+:\s*', '', raw, count=1).strip()
+            if extracted and not subject:
+                subject = extracted
+            return  # consumed, don't add to any section
+        if section_type == 'preview':
+            raw = get_text_content(tag).strip()
+            extracted = re.sub(r'^[^:]+:\s*', '', raw, count=1).strip()
+            if extracted and not preview:
+                preview = extracted
+            return
+
+        # Also detect inline subject/preview in the 'other' or 'email_section' when
+        # the keyword and value are on the SAME line (e.g. "Тема: My Subject")
+        if not subject or not preview:
+            txt = get_text_content(tag).strip()
+            txt_lower = txt.lower()
+            for kw in ['тема письма:', 'тема:', 'subject:']:
+                if txt_lower.startswith(kw) and not subject:
+                    subject = re.sub(r'^[^:]+:\s*', '', txt, count=1).strip()
+                    return
+            for kw in ['превью:', 'прехедер:', 'preview:', 'preheader:']:
+                if txt_lower.startswith(kw) and not preview:
+                    preview = re.sub(r'^[^:]+:\s*', '', txt, count=1).strip()
+                    return
+
+        if current_section == 'tg_section' and tg_subsections:
+            tg_subsections[-1]['blocks'].append(tag)
+        elif current_section == 'email_section' and email_subsections:
+            email_subsections[-1]['blocks'].append(tag)
+        else:
+            sections['other'].append(tag)
+
+    def walk_blocks(parent):
+        """Walk direct block children; for ul/ol peek inside for section-header li items."""
+        for child in parent.children:
+            if not hasattr(child, 'name') or child.name is None:
+                continue
+            name = child.name
+            if name in ('h1', 'h2', 'h3', 'h4', 'p', 'table'):
+                process_block(child)
+            elif name in ('ul', 'ol'):
+                # Peek at direct <li> children for section headers
+                lis = child.find_all('li', recursive=False)
+                if any(is_section_header(li) for li in lis):
+                    for li in lis:
+                        process_block(li)
+                else:
+                    process_block(child)
+            elif name == 'div':
+                div_id = child.get('id', '')
+                # Skip Google Docs comment/annotation divs (id="cmnt1", "cmnt2", etc.)
+                if re.match(r'^cmnt', div_id):
+                    continue
+                walk_blocks(child)
+
+    walk_blocks(body)
+
+    # Build HTML strings for each section
+    def tags_to_html(tags):
+        parts = []
+        for t in tags:
+            txt = t.get_text(strip=True)
+            if txt or t.name in ('ul', 'ol', 'table'):
+                parts.append(str(t))
+        return '\n'.join(parts)
+
+    # Build email variants
+    email_variant_list = []
+    for sub in email_subsections:
+        html = tags_to_html(sub['blocks'])
+        if html:
+            email_variant_list.append({'name': sub['name'], 'html': html})
+
+    if not email_variant_list:
+        email_html = ''
+        email_variants = None
+    elif len(email_variant_list) == 1:
+        email_html = email_variant_list[0]['html']
+        email_variants = None
+    else:
+        # Default to first variant (usually "1 клик" with GC vars)
+        email_html = email_variant_list[0]['html']
+        email_variants = email_variant_list
+
+    # Build TG variants
+    tg_variant_list = []
+    for sub in tg_subsections:
+        html = tags_to_html(sub['blocks'])
+        if html:
+            tg_variant_list.append({'name': sub['name'], 'html': html})
+
+    if not tg_variant_list:
+        tg_html = ''
+        tg_variants = None
+    elif len(tg_variant_list) == 1:
+        tg_html = tg_variant_list[0]['html']
+        tg_variants = None
+    else:
+        # Default to last variant (usually "1 клик" with GC vars)
+        tg_html = tg_variant_list[-1]['html']
+        tg_variants = tg_variant_list
+
+    # Fallback: if only one content block found, use it for both
+    if not email_html and not tg_html:
+        email_html = tags_to_html(sections['other'])
+        tg_html = email_html
+        email_variants = None
+        tg_variants = None
+    elif not email_html:
+        email_html = tg_html
+        email_variants = None
+
+    # Resolve Google Docs comment references (<sup><a href="#cmntN">) to real URLs
+    if cmnt_url_map:
+        email_html = resolve_comment_refs(email_html, cmnt_url_map)
+        tg_html = resolve_comment_refs(tg_html, cmnt_url_map)
+        if tg_variants:
+            for v in tg_variants:
+                v['html'] = resolve_comment_refs(v['html'], cmnt_url_map)
+        if email_variants:
+            for v in email_variants:
+                v['html'] = resolve_comment_refs(v['html'], cmnt_url_map)
+    elif not tg_html:
+        tg_html = email_html
+
+    return {
+        'email_html': email_html,
+        'email_variants': email_variants,
+        'tg_html': tg_html,
+        'tg_variants': tg_variants,
+        'subject': subject,
+        'preview': preview,
+        'links': all_links,
+        'footnotes': footnotes,
+    }
+
+# ---------------------------------------------------------------------------
+# Email HTML generation
+# ---------------------------------------------------------------------------
+
+GC_VAR_RE = re.compile(r'\{[^}]+\}')
+
+def elem_inner_html_for_email(tag, _in_bold=False, link_color='#1445ea'):
+    """
+    Convert a BS4 tag's contents to email-safe HTML:
+    - keep <b>, <strong>, <i>, <em>, <a href>
+    - decode Google redirect URLs
+    - preserve GC variables
+    """
+    parts = []
+    for child in tag.children:
+        if isinstance(child, NavigableString):
+            parts.append(str(child))
+        elif isinstance(child, Tag):
+            name = child.name
+            if name in ('b', 'strong'):
+                inner = elem_inner_html_for_email(child, _in_bold=True, link_color=link_color)
+                parts.append(f'<b>{inner}</b>')
+            elif name in ('i', 'em'):
+                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, link_color=link_color)
+                parts.append(f'<i>{inner}</i>')
+            elif name == 'a' and child.get('href'):
+                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, link_color=link_color)
+                href = decode_google_redirect(child['href'])
+                parts.append(f'<a href="{href}" target="_blank" style="color:{link_color};text-decoration:underline">{inner}</a>')
+            elif name == 'sup':
+                pass
+            elif name == 'span':
+                style = child.get('style', '')
+                is_bold = ('font-weight:700' in style or 'font-weight: 700' in style
+                           or 'font-weight:bold' in style or 'font-weight: bold' in style)
+                is_italic = 'font-style:italic' in style or 'font-style: italic' in style
+                inner = elem_inner_html_for_email(child, _in_bold=_in_bold or is_bold, link_color=link_color)
+                if is_bold and not _in_bold:
+                    inner = f'<b>{inner}</b>'
+                if is_italic:
+                    inner = f'<i>{inner}</i>'
+                parts.append(inner)
+            elif name == 'br':
+                parts.append('<br>')
+            else:
+                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, link_color=link_color)
+                parts.append(inner)
+    return ''.join(parts)
+
+# Matches {first_name} GC variable (plain text, not inside HTML tags)
+_FIRST_NAME_VAR = r'\{first_name\}'
+
+def _strip_first_name(text):
+    """Remove {first_name} GC variable with smart punctuation/capitalization cleanup.
+
+    Handles patterns like:
+      'Привет, {first_name}!'  → 'Привет!'
+      '{first_name}, привет!'  → 'Привет!'
+      '{first_name}! Текст'    → 'Текст'
+      'Привет {first_name}!'   → 'Привет!'
+    """
+    def _cap(s):
+        s = s.strip()
+        return s[0].upper() + s[1:] if s else s
+
+    # {first_name} at start + optional separator → remove and capitalize what follows
+    text, n = re.subn(r'^\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*', '', text)
+    if n:
+        text = _cap(text)
+
+    # ", {first_name}" or " {first_name}" in the middle → remove cleanly
+    text = re.sub(r'\s*,\s*' + _FIRST_NAME_VAR, '', text)
+    text = re.sub(r'\s+' + _FIRST_NAME_VAR, '', text)
+
+    # Any remaining bare occurrence
+    text = re.sub(_FIRST_NAME_VAR, '', text)
+
+    # Clean up leftover leading punctuation or extra spaces
+    text = re.sub(r'^[,\s]+', '', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+
+    return text.strip()
+
+
+def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18, color='#333333', link_color='#1445ea'):
+    """Convert a single <p> or heading tag to an email <p> with styles."""
+    inner = elem_inner_html_for_email(tag, link_color=link_color)
+    inner = inner.strip()
+    if not inner:
+        return None
+
+    # Strip {first_name} GC variable for channels that need it
+    if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+        inner = _strip_first_name(inner)
+    if not inner:
+        return None
+
+    # Inject UTM into hrefs
+    inner = inject_utm_in_html(inner, channel_key, campaign, date)
+
+    # Preserve text alignment from the original tag
+    tag_style = tag.get('style', '')
+    align_prefix = ''
+    if 'text-align:center' in tag_style or 'text-align: center' in tag_style:
+        align_prefix = 'text-align:center;'
+    elif 'text-align:right' in tag_style or 'text-align: right' in tag_style:
+        align_prefix = 'text-align:right;'
+
+    # Detect if this is a heading (larger font)
+    if tag.name in ('h1', 'h2', 'h3'):
+        fs = 22 if tag.name == 'h1' else 20
+        style = (
+            f"{align_prefix}margin:0 0 8px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+            f"line-height:32px;color:{color};font-size:{fs}px;font-weight:bold"
+        )
+    else:
+        style = (
+            f"{align_prefix}margin:0 0 10px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+            f"line-height:27px;color:{color};font-size:{font_size}px"
+        )
+    return f'<p style="{style}">{inner}</p>'
+
+# Matches paragraph whose entire text is [BUTTON TEXT]
+_BTN_BRACKET_RE = re.compile(r'^\s*\[([^\]]+)\]\s*$', re.DOTALL)
+
+_CHECKMARKS = ['✅', '❌', '☑', '☒']
+_FEATURE_EMOJI = ['💎', '🎁', '🎯', '📌', '🔑', '⭐', '🏆', '💡', '🚀', '📅', '🗓', '📢']
+
+def render_block_from_tags(tags, channel_key, campaign, date):
+    """
+    Given a list of BS4 tags from one logical block, build an email table row.
+    Detects [BUTTON TEXT] CTAs, checkmark lists, feature emoji, etc.
+    Returns (html_string, meta_dict) or (None, None).
+    """
+    tags = [t for t in tags if not _is_reklama(t)]
+    if not tags:
+        return None, None
+
+    combined_text = ' '.join(t.get_text(strip=True) for t in tags)
+    first_text = tags[0].get_text(strip=True) if tags else ''
+    preview_text = combined_text[:80]
+
+    # Build an ordered items list: {'kind': 'tag', 'tag': tag} or {'kind': 'btn', 'text': str, 'url': str}
+    items = []
+
+    for tag in tags:
+        tag_text = tag.get_text(strip=True)
+
+        # Case 1: the whole tag is [BUTTON TEXT]
+        m = _BTN_BRACKET_RE.match(tag_text)
+        if m:
+            btn_label = m.group(1).strip()
+            a = tag.find('a', href=True)
+            items.append({'kind': 'btn', 'text': btn_label, 'url': a.get('href', '#') if a else '#'})
+            continue
+
+        # Case 2: an <a> inside the tag wraps [BUTTON TEXT]
+        found_btn_anchor = False
+        for a in tag.find_all('a', href=True):
+            if _BTN_BRACKET_RE.match(a.get_text(strip=True)):
+                m2 = _BTN_BRACKET_RE.match(a.get_text(strip=True))
+                btn_label = m2.group(1).strip()
+                btn_href = a.get('href', '#')
+                tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                if tag_copy:
+                    for ba in tag_copy.find_all('a', href=True):
+                        if _BTN_BRACKET_RE.match(ba.get_text(strip=True)):
+                            ba.decompose()
+                    if tag_copy.get_text(strip=True):
+                        items.append({'kind': 'tag', 'tag': tag_copy})
+                items.append({'kind': 'btn', 'text': btn_label, 'url': btn_href})
+                found_btn_anchor = True
+                break
+        if not found_btn_anchor:
+            items.append({'kind': 'tag', 'tag': tag})
+
+    has_btn = any(item['kind'] == 'btn' for item in items)
+    has_checkmarks = any(c in combined_text for c in _CHECKMARKS)
+    starts_with_feature = any(first_text.startswith(e) for e in _FEATURE_EMOJI)
+
+    if has_btn:
+        # CTA block: render items in document order, button at its actual position
+        FONT_BASE = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif"
+        BTN_A_STYLE = (
+            "background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
+            "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+            "font-size:16px;display:inline-block;font-weight:600"
+        )
+
+        inner_rows = []
+        for item in items:
+            if item['kind'] == 'tag':
+                tag = item['tag']
+                if tag.name in ('ul', 'ol'):
+                    li_parts = []
+                    for li in tag.find_all('li'):
+                        inner = elem_inner_html_for_email(li, link_color='#e1fb52')
+                        inner = inject_utm_in_html(inner, channel_key, campaign, date)
+                        li_s = (f"margin:0 0 6px 0;padding-left:20px;{FONT_BASE};"
+                                "line-height:27px;color:#ffffff;font-size:18px")
+                        li_parts.append(f'<p style="{li_s}">• {inner}</p>')
+                    if li_parts:
+                        inner_rows.append(
+                            '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
+                            + '\n'.join(li_parts) + '\n</td></tr>'
+                        )
+                else:
+                    ph = tag_to_email_p(tag, channel_key, campaign, date, color='#ffffff', link_color='#e1fb52')
+                    if ph:
+                        inner_rows.append(
+                            '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
+                            + ph + '\n</td></tr>'
+                        )
+            elif item['kind'] == 'btn':
+                btn_url_utm = build_utm_url(item['url'], channel_key, campaign, date)
+                inner_rows.append(
+                    '<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
+                    f'<a href="{btn_url_utm}" target="_blank" style="{BTN_A_STYLE}">{item["text"]}</a>\n'
+                    '</td></tr>'
+                )
+
+        # Adjust top/bottom padding of first and last rows
+        if inner_rows:
+            inner_rows[0] = (
+                inner_rows[0]
+                .replace('style="padding:4px 15px"', 'style="padding:14px 15px 4px"', 1)
+                .replace('style="padding:8px 0 12px;margin:0"', 'style="padding:14px 0 12px;margin:0"', 1)
+            )
+            inner_rows[-1] = (
+                inner_rows[-1]
+                .replace('style="padding:4px 15px"', 'style="padding:4px 15px 14px"', 1)
+                .replace('style="padding:8px 0 12px;margin:0"', 'style="padding:8px 0 18px;margin:0"', 1)
+            )
+
+        html = (
+            '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+            '<table cellspacing="0" cellpadding="0" width="100%" '
+            'style="border-collapse:separate;border-spacing:0;border:10px solid #1445ea;border-radius:20px" '
+            'role="presentation">\n'
+            + '\n'.join(inner_rows)
+            + '\n</table></td></tr>'
+        )
+
+        # Meta: collect text content for editing (buttons stored separately)
+        text_parts = []
+        for item in items:
+            if item['kind'] == 'tag':
+                ph = tag_to_email_p(item['tag'], channel_key, campaign, date, color='#ffffff', link_color='#e1fb52')
+                if ph:
+                    text_parts.append(ph)
+        paragraphs_html = '\n'.join(text_parts)
+
+        first_btn = next((i for i in items if i['kind'] == 'btn'), None)
+        btn_text_meta = first_btn['text'] if first_btn else ''
+        btn_url_meta = build_utm_url(first_btn['url'], channel_key, campaign, date) if first_btn else '#'
+
+        meta = {
+            'type': 'block_blue_cta',
+            'paragraphs_html': paragraphs_html,
+            'btn_text': btn_text_meta,
+            'btn_url_utm': btn_url_meta,
+            'preview_text': preview_text,
+        }
+        return html, meta
+
+    # Non-CTA blocks: render all tag items as paragraphs
+    p_parts = []
+    for item in items:
+        if item['kind'] != 'tag':
+            continue
+        tag = item['tag']
+        if tag.name in ('ul', 'ol'):
+            for li in tag.find_all('li'):
+                inner = elem_inner_html_for_email(li)
+                inner = inject_utm_in_html(inner, channel_key, campaign, date)
+                s = ("margin:0 0 6px 0;padding-left:20px;font-family:roboto,'helvetica neue',"
+                     "helvetica,arial,sans-serif;line-height:27px;color:#333333;font-size:18px")
+                p_parts.append(f'<p style="{s}">• {inner}</p>')
+        else:
+            ph = tag_to_email_p(tag, channel_key, campaign, date)
+            if ph:
+                p_parts.append(ph)
+
+    paragraphs_html = '\n'.join(p_parts)
+
+    if has_checkmarks:
+        meta = {'type': 'block_grey', 'paragraphs_html': paragraphs_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': preview_text}
+        return block_grey(paragraphs_html), meta
+    elif starts_with_feature:
+        meta = {'type': 'block_dotted', 'paragraphs_html': paragraphs_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': preview_text}
+        return block_dotted(paragraphs_html), meta
+    else:
+        meta = {'type': 'block_white', 'paragraphs_html': paragraphs_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': preview_text}
+        return block_white(paragraphs_html), meta
+
+def _is_reklama(tag):
+    t = tag.get_text(strip=True)
+    return _REKLAMA_RE.search(t) or 'ИНН 9715401631' in t
+
+def _cell_para_html(cell, channel_key, campaign, date, font_size=18):
+    """Extract email-paragraph HTML from a table cell (for 2-col detection).
+    Returns (text_html, buttons) where buttons = list of (btn_text, btn_url).
+    Paragraphs matching [TEXT] with a hyperlink are extracted as buttons.
+    """
+    ctags = [t for t in cell.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
+             if t.get_text(strip=True) and not _is_reklama(t)]
+    parts = []
+    buttons = []
+    for tag in ctags:
+        text = tag.get_text(strip=True)
+        # Detect [BUTTON TEXT] hyperlink pattern → extract as separate button
+        if re.match(r'^\[.{3,100}\]$', text):
+            link = tag.find('a', href=True)
+            if link:
+                btn_text = text.strip('[]')
+                raw_url = decode_google_redirect(link.get('href', '#'))
+                btn_url = build_utm_url(raw_url, channel_key, campaign, date)
+                buttons.append((btn_text, btn_url))
+                continue
+        if tag.name in ('ul', 'ol'):
+            for li in tag.find_all('li'):
+                inner = elem_inner_html_for_email(li)
+                inner = inject_utm_in_html(inner, channel_key, campaign, date)
+                lh = round(font_size * 1.5)
+                s = (f"margin:0 0 6px 0;padding-left:20px;"
+                     f"font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+                     f"line-height:{lh}px;color:#333333;font-size:{font_size}px")
+                parts.append(f'<p style="{s}">• {inner}</p>')
+        else:
+            ph = tag_to_email_p(tag, channel_key, campaign, date, font_size=font_size)
+            if ph:
+                parts.append(ph)
+    return '\n'.join(parts), buttons
+
+def generate_email_html(email_section_html, channel_key, campaign, date, images, subject=''):
+    """
+    Build the complete email HTML from parsed section HTML.
+    Each top-level <table> in the source maps to one distinct block.
+    Standalone <p>/<h*>/<ul>/<ol> tags are grouped between tables.
+    """
+    soup = BeautifulSoup(email_section_html, 'lxml')
+    body = soup.find('body') or soup
+
+    raw_blocks = []  # list of (row_html, meta_dict)
+    pending_tags = []
+    user_img_idx = [0]  # tracks which user-provided image URL to use next
+
+    def flush_pending():
+        if not pending_tags:
+            return
+        row, meta = render_block_from_tags(list(pending_tags), channel_key, campaign, date)
+        if row:
+            raw_blocks.append((row, meta))
+        pending_tags.clear()
+
+    def process_element(el):
+        if not hasattr(el, 'name') or el.name is None:
+            return
+        if el.name == 'table':
+            flush_pending()
+            # Detect Google Docs 2-column table (first row with exactly 2 cells)
+            tbody = el.find('tbody') or el
+            trows = tbody.find_all('tr', recursive=False)
+            two_col_cells = None
+            for trow in trows:
+                rc = trow.find_all(['td', 'th'], recursive=False)
+                if len(rc) == 2:
+                    two_col_cells = rc
+                    break
+
+            if two_col_cells:
+                left_html,  left_btns  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16)
+                right_html, right_btns = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16)
+                l_img = two_col_cells[0].find('img')
+                r_img = two_col_cells[1].find('img')
+                l_src = l_img.get('src', '') if l_img else ''
+                r_src = r_img.get('src', '') if r_img else ''
+
+                row = None
+                meta = None
+                if left_html.strip() and right_html.strip():
+                    pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
+                    meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_html,
+                            'col2_html': right_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                    row = block_2col_text_text(left_html, right_html)
+                elif l_src and not left_html.strip() and right_html.strip():
+                    img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else l_src
+                    if user_img_idx[0] < len(images):
+                        user_img_idx[0] += 1
+                    pv = BeautifulSoup(right_html, 'lxml').get_text(strip=True)[:50]
+                    meta = {'type': 'block_2col_img_text', 'paragraphs_html': right_html,
+                            'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                    row = block_2col_img_text(img_to_use, right_html)
+                elif r_src and not right_html.strip() and left_html.strip():
+                    img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else r_src
+                    if user_img_idx[0] < len(images):
+                        user_img_idx[0] += 1
+                    pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
+                    meta = {'type': 'block_2col_text_img', 'paragraphs_html': left_html,
+                            'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                    row = block_2col_text_img(left_html, img_to_use)
+
+                if row:
+                    raw_blocks.append((row, meta))
+                    for btn_text, btn_url in left_btns + right_btns:
+                        raw_blocks.append((
+                            block_button(btn_url, btn_text),
+                            {'type': 'block_button', 'paragraphs_html': '',
+                             'btn_text': btn_text, 'btn_url_utm': btn_url,
+                             'preview_text': btn_text[:50]}
+                        ))
+                    return
+
+            # Normal table: extract all text, skip РЕКЛАМА
+            inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
+                     if t.get_text(strip=True) and not _is_reklama(t)]
+            if inner:
+                row, meta = render_block_from_tags(inner, channel_key, campaign, date)
+                if row:
+                    raw_blocks.append((row, meta))
+        elif el.name in ('h1', 'h2', 'h3', 'h4', 'ul', 'ol'):
+            if el.get_text(strip=True) and not _is_reklama(el):
+                pending_tags.append(el)
+        elif el.name == 'p':
+            raw_txt = el.get_text(strip=True)
+            if _is_reklama(el):
+                return
+            if raw_txt:
+                pending_tags.append(el)
+            else:
+                flush_pending()
+        elif el.name == 'div':
+            for sub in el.children:
+                process_element(sub)
+
+    for child in body.children:
+        process_element(child)
+    flush_pending()
+
+    # Auto-alternate consecutive same-type simple blocks to avoid visual repetition
+    ALTERNATABLE = {'block_white', 'block_grey', 'block_dotted'}
+    for i in range(1, len(raw_blocks)):
+        prev_meta = raw_blocks[i - 1][1]
+        curr_html, curr_meta = raw_blocks[i]
+        if not prev_meta or not curr_meta:
+            continue
+        prev_type = prev_meta.get('type', '')
+        curr_type = curr_meta.get('type', '')
+        if prev_type == curr_type and curr_type in ALTERNATABLE:
+            new_type = 'block_grey' if curr_type == 'block_white' else 'block_white'
+            curr_meta['type'] = new_type
+            ph = curr_meta.get('paragraphs_html', '')
+            new_html = block_grey(ph) if new_type == 'block_grey' else block_white(ph)
+            raw_blocks[i] = (new_html, curr_meta)
+
+    # Add default spacer before footer
+    spacer_meta = {'type': 'block_spacer', 'height': 20, 'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '', 'preview_text': 'Отступ'}
+    raw_blocks.append((block_spacer(20), spacer_meta))
+
+    # Build final content rows; remaining user images (not used in 2-col blocks) go at the end
+    content_rows = []
+    blocks_data = []
+
+    for row_html, meta in raw_blocks:
+        content_rows.append(row_html)
+        blocks_data.append(meta)
+
+    for leftover_img in images[user_img_idx[0]:]:
+        content_rows.append(block_image_center(leftover_img))
+        blocks_data.append({'type': 'block_image', 'image_url': leftover_img,
+                            'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '',
+                            'preview_text': 'Картинка'})
+
+    content_table = (
+        '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" '
+        'role="none" style="border-collapse:collapse;border-spacing:0;width:600px;background-color:#ffffff">\n'
+        + '\n'.join(content_rows)
+        + '\n</table>'
+    )
+
+    logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
+    subject_safe = subject or 'Рассылка ZeroCoder'
+
+    html = (
+        EMAIL_WRAPPER_START.replace('{subject}', subject_safe)
+        + logo_header
+        + content_table
+        + EMAIL_FOOTER
+        + EMAIL_WRAPPER_END
+    )
+    return html, blocks_data
+
+# ---------------------------------------------------------------------------
+# TG HTML generation
+# ---------------------------------------------------------------------------
+
+def clean_tag_for_tg(tag, _in_bold=False):
+    """
+    Convert a BS4 tag to TG-compatible HTML:
+    Only keep <b>, <i>, <a href="...">, <code>, line breaks.
+    """
+    parts = []
+    for child in tag.children:
+        if isinstance(child, NavigableString):
+            parts.append(str(child))
+        elif isinstance(child, Tag):
+            name = child.name
+            if name in ('b', 'strong'):
+                inner = clean_tag_for_tg(child, _in_bold=True)
+                parts.append(f'<b>{inner}</b>')
+            elif name in ('i', 'em'):
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                parts.append(f'<i>{inner}</i>')
+            elif name == 'u':
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                parts.append(f'<u>{inner}</u>')
+            elif name == 's':
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                parts.append(f'<s>{inner}</s>')
+            elif name == 'code':
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                parts.append(f'<code>{inner}</code>')
+            elif name == 'a' and child.get('href'):
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                href = decode_google_redirect(child['href'])
+                parts.append(f'<a href="{href}">{inner}</a>')
+            elif name == 'sup':
+                pass
+            elif name == 'span':
+                style = child.get('style', '')
+                is_bold = ('font-weight:700' in style or 'font-weight: 700' in style
+                           or 'font-weight:bold' in style or 'font-weight: bold' in style)
+                is_italic = 'font-style:italic' in style or 'font-style: italic' in style
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold or is_bold)
+                if is_bold and not _in_bold:
+                    inner = f'<b>{inner}</b>'
+                if is_italic:
+                    inner = f'<i>{inner}</i>'
+                parts.append(inner)
+            elif name == 'br':
+                parts.append('\n')
+            else:
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                parts.append(inner)
+    return ''.join(parts)
+
+_REKLAMA_RE        = re.compile(r'реклама\s+ооо', re.IGNORECASE)
+_SINGLE_PUNCT_BOLD = re.compile(r'\*\*([!?.,;:])\*\*')
+_ANY_BOLD_RE       = re.compile(r'\*\*([^*\n]+?)\*\*')
+
+
+def _postprocess_md(text):
+    """Fix common Markdown bold artefacts produced from Google Docs spans."""
+    # 1. Merge adjacent bold: **A** **B** → **A B**
+    #    Collapse closing-then-opening ** separated only by whitespace (incl. \xa0).
+    text = re.sub(r'\*\*[ \t\xa0]*\*\*', ' ', text)
+    # 2. Drop bold around single punctuation: **!** → !
+    text = _SINGLE_PUNCT_BOLD.sub(r'\1', text)
+    # 3. Move leading emoji/symbol outside bold: **🔥text** → 🔥**text**
+    def _fix_emoji(m):
+        content = m.group(1)
+        prefix, rest = '', content
+        while rest and not (rest[0].isalpha() or rest[0].isdigit() or rest[0] in '{_'):
+            prefix += rest[0]
+            rest = rest[1:]
+        return f'{prefix}**{rest}**' if (prefix and rest) else m.group(0)
+    text = _ANY_BOLD_RE.sub(_fix_emoji, text)
+    return text
+
+
+def _md_wrap(marker, inner):
+    """Wrap inner text in Markdown markers, keeping spaces outside the markers."""
+    if not inner or not inner.strip():
+        return inner
+    stripped = inner.strip()
+    leading  = inner[:len(inner) - len(inner.lstrip())]
+    trailing = inner[len(inner.rstrip()):]
+    return f'{leading}{marker}{stripped}{marker}{trailing}'
+
+
+def clean_tag_for_tg_markdown(tag, links_collector, _in_bold=False):
+    """
+    Convert a BS4 tag to Markdown: **bold**, *italic*.
+    Link URLs are appended to links_collector; link text is kept as plain text.
+    """
+    parts = []
+    for child in tag.children:
+        if isinstance(child, NavigableString):
+            parts.append(str(child))
+        elif isinstance(child, Tag):
+            name = child.name
+            if name in ('b', 'strong'):
+                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=True)
+                parts.append(_md_wrap('**', inner) if not _in_bold else inner)
+            elif name in ('i', 'em'):
+                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold)
+                parts.append(_md_wrap('*', inner))
+            elif name == 'a' and child.get('href'):
+                href = decode_google_redirect(child['href'])
+                if not href.startswith('#'):
+                    links_collector.append(href)
+                parts.append(child.get_text())
+            elif name == 'sup':
+                pass
+            elif name == 'span':
+                style    = child.get('style', '')
+                is_bold  = ('font-weight:700' in style or 'font-weight: 700' in style
+                            or 'font-weight:bold' in style or 'font-weight: bold' in style)
+                is_italic = 'font-style:italic' in style or 'font-style: italic' in style
+                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold or is_bold)
+                if is_bold and not _in_bold:
+                    inner = _md_wrap('**', inner)
+                if is_italic:
+                    inner = _md_wrap('*', inner)
+                parts.append(inner)
+            elif name == 'br':
+                parts.append('\n')
+            else:
+                parts.append(clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold))
+    return ''.join(parts)
+
+
+def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
+    """
+    Generate Markdown text for Neurocat. Returns (text, utm_links).
+    Bold → **text**, italic → *text*, links → collected separately with UTM.
+    """
+    soup = BeautifulSoup(tg_section_html, 'lxml')
+    body = soup.find('body') or soup
+
+    result_parts = []
+    raw_links = []
+
+    for tag in body.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol']):
+        if tag.name in ('ul', 'ol'):
+            lines = []
+            for li in tag.find_all('li'):
+                inner = clean_tag_for_tg_markdown(li, raw_links).strip()
+                if inner and CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+                    inner = _strip_first_name(inner)
+                if inner:
+                    lines.append(f'• {inner}')
+            if lines:
+                result_parts.append('\n'.join(lines))
+            continue
+
+        raw_text = tag.get_text(strip=True)
+        if _REKLAMA_RE.search(raw_text) or 'ИНН 9715401631' in raw_text:
+            continue
+        if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
+            continue
+
+        inner = _postprocess_md(clean_tag_for_tg_markdown(tag, raw_links).strip())
+        if not inner:
+            continue
+
+        if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+            inner = _strip_first_name(inner)
+        if not inner:
+            continue
+
+        if tag.name in ('h1', 'h2', 'h3', 'h4'):
+            inner = f'**{inner}**'
+
+        result_parts.append(inner)
+
+    text = '\n\n'.join(result_parts)
+    text += '\n\nРЕКЛАМА ООО "ЗЕРОКОДЕР"\nИНН 9715401631'
+
+    # De-duplicate links, apply UTM
+    seen = set()
+    utm_links = []
+    for url in raw_links:
+        if url not in seen:
+            seen.add(url)
+            utm_links.append(build_utm_url(url, channel_key, campaign, date))
+
+    return text, utm_links
+
+def generate_tg_html(tg_section_html, channel_key, campaign, date):
+    """
+    Generate <p><b>...</b></p> style HTML for GC mailings / Max.
+    """
+    soup = BeautifulSoup(tg_section_html, 'lxml')
+    body = soup.find('body') or soup
+
+    result_parts = []
+    for tag in body.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol']):
+        if tag.name in ('ul', 'ol'):
+            for li in tag.find_all('li'):
+                inner = clean_tag_for_tg(li).strip()
+                if inner:
+                    result_parts.append(f'<p>• {inner}</p>')
+            result_parts.append('<p>&nbsp;</p>')
+            continue
+
+        raw_text = tag.get_text(strip=True)
+        # Skip РЕКЛАМА notice that may already be in the source doc
+        if _REKLAMA_RE.search(raw_text) or 'ИНН 9715401631' in raw_text:
+            continue
+        # Skip footnote anchor paragraphs ([a], [b], etc.)
+        if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
+            continue
+
+        inner = clean_tag_for_tg(tag).strip()
+        if not inner:
+            result_parts.append('<p>&nbsp;</p>')
+            continue
+
+        # Wrap headings in bold
+        if tag.name in ('h1', 'h2', 'h3', 'h4'):
+            inner = f'<b>{inner}</b>'
+
+        result_parts.append(f'<p>{inner}</p>')
+
+    output = '\n'.join(result_parts)
+    output = inject_utm_in_html(output, channel_key, campaign, date)
+
+    # Legal notice
+    output += '\n<p>&nbsp;</p>\n<p>РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>\n<p>ИНН 9715401631</p>'
+    return output
+
+def generate_tg_bots(tg_section_html, channel_key, campaign, date):
+    """
+    Generate simplified text (no <p> wrappers) for TG Bots channel.
+    Supports <b>, <i>, <a href>.
+    """
+    soup = BeautifulSoup(tg_section_html, 'lxml')
+    body = soup.find('body') or soup
+
+    result_parts = []
+    for tag in body.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol']):
+        if tag.name in ('ul', 'ol'):
+            lines = []
+            for li in tag.find_all('li'):
+                inner = clean_tag_for_tg(li).strip()
+                if inner:
+                    lines.append(f'• {inner}')
+            if lines:
+                result_parts.append('\n'.join(lines))
+            continue
+
+        raw_text = tag.get_text(strip=True)
+        if _REKLAMA_RE.search(raw_text) or 'ИНН 9715401631' in raw_text:
+            continue
+        if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
+            continue
+
+        inner = clean_tag_for_tg(tag).strip()
+        if not inner:
+            continue
+
+        if tag.name in ('h1', 'h2', 'h3', 'h4'):
+            inner = f'<b>{inner}</b>'
+
+        result_parts.append(inner)
+
+    output = '\n\n'.join(result_parts)
+    output = inject_utm_in_html(output, channel_key, campaign, date)
+    if CHANNELS.get(channel_key, {}).get('rename_first_name'):
+        output = output.replace('{first_name}', '{firstName}')
+    output += '\n\nРЕКЛАМА ООО "ЗЕРОКОДЕР"\nИНН 9715401631'
+    return output
+
+def _pick_tg_src(ch_info, tg_variants_list, tg_section_html, email_section_html):
+    """Return the correct TG HTML source for a channel based on tg_variant_index."""
+    variant_idx = ch_info.get('tg_variant_index')
+    if variant_idx is not None and tg_variants_list and isinstance(tg_variants_list, list):
+        if variant_idx < len(tg_variants_list):
+            return tg_variants_list[variant_idx]['html']
+        return tg_variants_list[-1]['html']
+    return tg_section_html or email_section_html
+
+
+# ---------------------------------------------------------------------------
+# Flask routes
+# ---------------------------------------------------------------------------
+
+@app.route('/')
+def index():
+    return render_template('index.html', channels=CHANNELS)
+
+@app.route('/api/parse', methods=['POST'])
+def api_parse():
+    data = request.get_json(force=True)
+    url = data.get('url', '').strip()
+
+    if not url:
+        return jsonify({'error': 'URL не указан'}), 400
+
+    # Handle already-exported URLs
+    if 'export?format=html' in url:
+        doc_id = extract_doc_id(url)
+        export_url = url
+    else:
+        doc_id = extract_doc_id(url)
+        if not doc_id:
+            return jsonify({'error': 'Не удалось извлечь ID документа из ссылки'}), 400
+        export_url = None
+
+    try:
+        if export_url:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            resp = requests.get(export_url, headers=headers, allow_redirects=True, timeout=30)
+            resp.raise_for_status()
+            html_content = resp.text
+        else:
+            html_content = fetch_google_doc_html(doc_id)
+    except requests.RequestException as e:
+        return jsonify({'error': f'Ошибка загрузки документа: {str(e)}'}), 502
+
+    try:
+        parsed = parse_doc_html(html_content)
+    except Exception as e:
+        return jsonify({'error': f'Ошибка разбора документа: {str(e)}'}), 500
+
+    return jsonify({
+        'email_html': parsed['email_html'],
+        'email_variants': parsed.get('email_variants'),
+        'tg_html': parsed['tg_html'],
+        'tg_variants': parsed.get('tg_variants'),
+        'subject': parsed['subject'],
+        'preview': parsed['preview'],
+        'links': parsed['links'][:50],
+        'footnotes': parsed['footnotes'],
+    })
+
+@app.route('/api/generate', methods=['POST'])
+def api_generate():
+    data = request.get_json(force=True)
+    content = data.get('content', {})
+    channels = data.get('channels', list(CHANNELS.keys()))
+    campaign = data.get('campaign', '')
+    date = data.get('date', '')
+    images = data.get('images', [])
+    subject = content.get('subject', '')
+
+    email_section_html = content.get('email_html', '')
+    tg_section_html = content.get('tg_html', '')
+    email_variants = content.get('email_variants')  # list of {'name', 'html'} or None
+    tg_variants_content = content.get('tg_variants')  # list of {'name', 'html'} or None
+
+    skip_hosts = {'docs.google.com', 'www.google.com', 'google.com', 'drive.google.com'}
+    doc_urls = []
+    seen_urls = set()
+
+    def _add_doc_url(u):
+        if not u or not u.startswith('http'):
+            return
+        host = urlparse(u).netloc.lstrip('www.')
+        if host in skip_hosts:
+            return
+        if u not in seen_urls:
+            seen_urls.add(u)
+            doc_urls.append(u)
+
+    # Regular hyperlinks from document body
+    for lnk in content.get('links', []):
+        _add_doc_url(lnk.get('url', '') if isinstance(lnk, dict) else str(lnk))
+
+    # Footnote/comment-style links (Google Docs [a][b] annotations with real URLs)
+    for fn in content.get('footnotes', []):
+        _add_doc_url(fn.get('url', '') if isinstance(fn, dict) else '')
+
+    result = {'doc_urls': doc_urls}
+
+    for ch_key in channels:
+        ch_info = CHANNELS.get(ch_key)
+        if not ch_info:
+            continue
+
+        fmt = ch_info.get('format', 'tg_html')
+
+        if fmt == 'email':
+            variant_idx = ch_info.get('email_variant_index', 0)
+            if email_variants and variant_idx < len(email_variants):
+                html_to_use = email_variants[variant_idx]['html']
+            else:
+                html_to_use = email_section_html
+            if html_to_use:
+                try:
+                    html, blocks = generate_email_html(
+                        html_to_use, ch_key, campaign, date, images, subject
+                    )
+                    result[ch_key] = html
+                    result[f'{ch_key}_blocks'] = blocks
+                except Exception as e:
+                    result[ch_key] = f'<!-- Error generating email: {e} -->'
+
+        elif fmt == 'tg_html':
+            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html)
+            if src:
+                try:
+                    result[ch_key] = generate_tg_html(src, ch_key, campaign, date)
+                except Exception as e:
+                    result[ch_key] = f'<!-- Error: {e} -->'
+
+        elif fmt == 'tg_bots':
+            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html)
+            if src:
+                try:
+                    result[ch_key] = generate_tg_bots(src, ch_key, campaign, date)
+                except Exception as e:
+                    result[ch_key] = f'Error: {e}'
+
+        elif fmt == 'tg_markdown':
+            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html)
+            if src:
+                try:
+                    text, links = generate_tg_markdown(src, ch_key, campaign, date)
+                    result[ch_key] = text
+                    result[f'{ch_key}_links'] = links
+                except Exception as e:
+                    result[ch_key] = f'Error: {e}'
+                    result[f'{ch_key}_links'] = []
+
+    return jsonify(result)
+
+@app.route('/api/assemble-email', methods=['POST'])
+def api_assemble_email():
+    data = request.get_json(force=True)
+    blocks = data.get('blocks', [])
+    subject = data.get('subject', '')
+    images = data.get('images', [])
+
+    content_rows = []
+    for block in blocks:
+        btype = block.get('type', 'block_white')
+        ph = block.get('paragraphs_html', '')
+        btn_text = block.get('btn_text', '')
+        btn_url_utm = block.get('btn_url_utm', '#')
+
+        if btype == 'block_blue_cta':
+            if ph.strip():
+                row = block_blue_cta(ph, btn_url_utm, btn_text)
+            else:
+                btn_style = (
+                    "background:#1445ea;color:#ffffff;padding:12px 28px;border-radius:30px;"
+                    "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+                    "font-size:16px;display:inline-block;font-weight:600"
+                )
+                row = (
+                    '<tr><td align="center" bgcolor="#ffffff" '
+                    'style="padding:12px 20px;background-color:#ffffff">\n'
+                    f'<a href="{btn_url_utm}" target="_blank" style="{btn_style}">{btn_text}</a>\n'
+                    '</td></tr>'
+                )
+        elif btype == 'block_grey':
+            row = block_grey(ph)
+        elif btype == 'block_dotted':
+            row = block_dotted(ph)
+        elif btype == 'block_blue_text':
+            row = block_blue_text(ph)
+        elif btype == 'block_button':
+            row = block_button(btn_url_utm, btn_text)
+        elif btype == 'block_spacer':
+            row = block_spacer(block.get('height', 20))
+        elif btype == 'block_image':
+            row = block_image_center(block.get('image_url', ''))
+        elif btype == 'block_2col_img_text':
+            row = block_2col_img_text(block.get('image_url', ''), ph)
+        elif btype == 'block_2col_text_img':
+            row = block_2col_text_img(ph, block.get('image_url', ''))
+        elif btype == 'block_2col_text_text':
+            row = block_2col_text_text(ph, block.get('col2_html', ''))
+        elif btype == 'block_3col_text':
+            row = block_3col_text(ph, block.get('col2_html', ''), block.get('col3_html', ''))
+        else:
+            row = block_white(ph)
+        content_rows.append(row)
+
+    content_table = (
+        '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" '
+        'role="none" style="border-collapse:collapse;border-spacing:0;width:600px;background-color:#ffffff">\n'
+        + '\n'.join(content_rows)
+        + '\n</table>'
+    )
+    logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
+    subject_safe = subject or 'Рассылка ZeroCoder'
+    html = (
+        EMAIL_WRAPPER_START.replace('{subject}', subject_safe)
+        + logo_header
+        + content_table
+        + EMAIL_FOOTER
+        + EMAIL_WRAPPER_END
+    )
+    return jsonify({'html': html})
+
+
+@app.route('/api/generate-utm', methods=['POST'])
+def api_generate_utm():
+    data = request.get_json(force=True)
+    base_url = data.get('url', '').strip()
+    campaign = data.get('campaign', '')
+    date = data.get('date', '')
+
+    if not base_url:
+        return jsonify({'error': 'URL не указан'}), 400
+
+    result = {}
+    for ch_key, ch_info in CHANNELS.items():
+        utm_url = build_utm_url(base_url, ch_key, campaign, date)
+        result[ch_key] = {
+            'name': ch_info['name'],
+            'url': utm_url,
+        }
+
+    return jsonify(result)
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
