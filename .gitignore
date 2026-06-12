@@ -28,5 +28,6 @@ Thumbs.db
 .env
 *.local
 
-# Claude Code internal
-.claude/
+# Claude Code internal (personal settings, not for sharing)
+.claude/settings.json
+.claude/settings.local.json
