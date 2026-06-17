@@ -1080,6 +1080,9 @@ html, body {
   cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
   user-select: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .fmt-btn:hover {
@@ -1183,4 +1186,39 @@ html, body {
   background: rgba(155, 89, 182, 0.07);
   box-sizing: border-box;
   min-height: 36px;
+}
+
+/* GetCourse push form */
+.gc-push-btn {
+  background: #1a7a3f;
+  color: #fff;
+  border-color: #1a7a3f;
+}
+.gc-push-btn:hover {
+  background: #15682f;
+  color: #fff;
+  border-color: #15682f;
+}
+.gc-push-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.gc-push-form input[type="text"] {
+  flex: 1;
+  min-width: 200px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+.gc-push-status {
+  font-size: 12px;
+  color: var(--purple);
 }

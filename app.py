@@ -1,9 +1,23 @@
 import re
+import os
+import json
+import logging
 import requests
 from flask import Flask, request, jsonify, render_template
 from bs4 import BeautifulSoup, NavigableString, Tag
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote, quote
+from dotenv import load_dotenv
+from openai import OpenAI
 from config import CHANNELS, LOGO_URL, SITE_URL, PHONE, LEGAL_NOTICE
+
+load_dotenv()
+
+logging.basicConfig(
+    filename='debug.log',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    encoding='utf-8',
+)
 
 app = Flask(__name__)
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
@@ -15,6 +29,164 @@ def no_cache_static(response):
         response.headers['Pragma'] = 'no-cache'
         response.headers['Expires'] = '0'
     return response
+
+# ---------------------------------------------------------------------------
+# AI parsing (OpenRouter)
+# ---------------------------------------------------------------------------
+
+_AI_SYSTEM_PROMPT = """Ты — помощник, который разбирает тексты рассылок на секции по каналам. Тебе дают сырой текст из Google Docs (экспорт в plain text). Твоя задача — определить границы секций и вернуть структурированный JSON.
+
+=== СТРУКТУРА ДОКУМЕНТА ===
+
+Документ состоит из секций, разделённых заголовками. Заголовки — это короткие строки (до 120 символов), которые называют канал или тип контента. Они НЕ являются частью контента письма.
+
+=== СЕКЦИИ И ИХ ЗАГОЛОВКИ ===
+
+**ТЕМА ПИСЬМА** (поле "subject"):
+Заголовок секции содержит одно из: "тема письма", "тема:", "темы:", "subject:"
+Значение — текст после двоеточия на той же строке, или следующая строка. Без самой метки.
+ВАЖНО: если тема письма вынесена отдельной строкой без двоеточия (как первый заголовок документа), определи её по контексту — короткая фраза до начала контента писем.
+
+**ПРЕХЕДЕР / ПРЕВЬЮ** (поле "preview"):
+Заголовок содержит: "превью:", "прехедер:", "preview:", "preheader:"
+Значение — текст после двоеточия. Без самой метки.
+
+**СЕКЦИИ, КОТОРЫЕ НУЖНО ПРОПУСКАТЬ (не включать в контент)**:
+- строки-заголовки секций (сами метки, не контент)
+- строки "ссылки:", "список ссылок", "ссылки"
+- строки "кампания:", "каналы:", "сегмент:", "исключаем", "включаем", "from:", "от кого:"
+- строки с адресами "@zerocoder", "care@", "getcourse", "unisender", "zerocoder.ru"
+- строки "РЕКЛАМА ООО", "ИНН 9715401631" (юридический дисклеймер)
+- строки-сноски вида "[a]", "[b]", "[1]" (аннотации к ссылкам)
+
+**EMAIL — ВАРИАНТ ДЛЯ ГК** (поле "email_gc"):
+
+‼️ КЛЮЧЕВОЕ ПРАВИЛО: Если заголовок секции содержит "1 клик", "1click", "в один клик" — эта секция ВСЕГДА идёт в email_gc, НЕЗАВИСИМО от порядка в документе.
+
+Примеры заголовков → email_gc: "Почта (1 клик)", "Email (1 клик)", "В 1 клик", "Контент письма (1 клик)"
+Также в email_gc идут секции с заголовками: "контент письма", "текст письма", "почта:", "e-mail:", "письмо:", "для почты", "email:"
+
+Эта секция содержит переменные {first_name}, {offer_url_...} и т.п. — сохранять нетронутыми.
+
+‼️ ВАЖНО: наличие текста "1 клик" или "в 1 клик" ВНУТРИ КНОПКИ или ссылки [ЗАРЕГИСТРИРОВАТЬСЯ В 1 КЛИК] — это КНОПКА, не заголовок секции. Такой текст не определяет принадлежность СЕКЦИИ к email_gc.
+
+**EMAIL — ВАРИАНТ ДЛЯ UNISENDER** (поле "email_unisender"):
+Секция с заголовком "другие источники", "другие каналы", "другой источник", "другие боты", "другой текст".
+Это письмо для Unisender — без GC-переменных {first_name} и т.п.
+Если такой секции нет — вернуть null.
+
+‼️ ВАЖНО: "Другие источники" это ОТДЕЛЬНАЯ секция — не путать с кнопками или ссылками внутри email_gc.
+
+**TG — ОСНОВНОЙ** (поле "tg_main"):
+Секции с заголовком "телеграм", "telegram", "тг", "tg", "max", "телеграм/max", "тг/max" и т.п.
+Это основной текст для ТГ бот ГК и Max. Если такой секции нет — вернуть null (не копировать email_gc).
+
+**TG — ВОРОНКИ** (поле "tg_voronki"):
+
+‼️ КЛЮЧЕВОЕ ПРАВИЛО: tg_voronki — это TG-текст для воронок/ботов. Его источник:
+- отдельная секция "тг воронки", "для воронки", "телеграм воронки"
+- ИЛИ TG-часть внутри секции "Другие источники" (если там есть короткий TG-текст отдельно от email)
+
+‼️ НЕЛЬЗЯ помещать в tg_voronki:
+- email-контент (длинные параграфы с {first_name}, кнопками [BUTTON], HTML-структурой)
+- содержимое email_gc
+- дубликат tg_main
+
+Если отдельного TG-текста для воронок нет — вернуть null.
+
+**НЕЙРОКОТ** (поле "neurocat"):
+Только если есть явная секция с заголовком "нейрокот". Иначе — null.
+
+=== ТИПИЧНАЯ СТРУКТУРА ДОКУМЕНТА ===
+
+Вариант A (с 1 кликом):
+1. Тема: ...
+2. Превью: ...
+3. [Почта (1 клик)] → email_gc (с {first_name}, для GetCourse)
+4. [Другие источники] → email_unisender (без {first_name}, для Unisender)
+   Если внутри "Другие источники" есть короткий TG-блок — это tg_voronki
+5. [ТГ / Telegram / Max] → tg_main
+
+Вариант B (без разделения):
+1. Тема: ...
+2. [Почта / Email] → email_gc
+3. [ТГ / Telegram] → tg_main
+
+=== ПРАВИЛА ОБРАБОТКИ КОНТЕНТА ===
+
+1. Сохраняй переменные {first_name}, {offer_url_...}, {firstName} и любые {переменная} НЕТРОНУТЫМИ.
+2. Сохраняй эмодзи в тексте и в кнопках.
+3. Сохраняй форматирование (<b>, <i>) если есть в исходнике.
+4. Сохраняй ссылки в тексте.
+5. Сохраняй маркеры списков и структуру абзацев.
+6. НЕ добавляй "РЕКЛАМА ООО ЗЕРОКОДЕР" и "ИНН 9715401631".
+7. НЕ включай заголовки секций в контент.
+8. Кнопки [ТЕКСТ КНОПКИ] — сохранять как есть, они обрабатываются отдельно.
+
+=== ФОРМАТ ОТВЕТА ===
+
+Возвращай ТОЛЬКО валидный JSON, без markdown-обёртки (без ```json, без пояснений).
+Если секция не найдена — верни null для этого поля.
+
+{
+  "subject": "текст темы письма без метки",
+  "preview": "текст прехедера без метки",
+  "email_gc": "полный текст email-секции для ГК (HTML или plain text)",
+  "email_unisender": "текст второго email-варианта или null",
+  "tg_main": "текст основного TG-варианта или null",
+  "tg_voronki": "TG-текст для воронок (короткий, без email-контента) или null",
+  "neurocat": "текст для Нейрокота или null"
+}"""
+
+
+def parse_with_ai(raw_html):
+    api_key = os.getenv('OPENROUTER_API_KEY')
+    base_url = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
+    model = os.getenv('OPENROUTER_MODEL', 'google/gemini-2.5-flash-lite')
+
+    if not api_key:
+        raise ValueError('OPENROUTER_API_KEY не задан в .env')
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    soup = BeautifulSoup(raw_html, 'lxml')
+    plain_text = soup.get_text(separator='\n', strip=True)
+
+    if len(plain_text) > 30000:
+        plain_text = plain_text[:30000]
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {'role': 'system', 'content': _AI_SYSTEM_PROMPT},
+            {'role': 'user', 'content': f'Текст документа:\n\n{plain_text}'},
+        ],
+        temperature=0.1,
+        max_tokens=8000,
+    )
+
+    raw_answer = response.choices[0].message.content.strip()
+    raw_answer = re.sub(r'^```(?:json)?\s*', '', raw_answer)
+    raw_answer = re.sub(r'\s*```$', '', raw_answer)
+
+    parsed = json.loads(raw_answer)
+    return parsed
+
+
+_EMPTY_P_RE = re.compile(
+    r'(<p[^>]*>(?:\s|&nbsp;|\xa0|<br\s*/?>)*</p>\s*)+$',
+    re.IGNORECASE
+)
+
+def strip_trailing_empty_paragraphs(html):
+    """Remove trailing empty/<br>-only <p> tags and last-paragraph bottom margin."""
+    html = _EMPTY_P_RE.sub('', html).rstrip()
+    # Remove bottom margin on the last <p> to avoid extra whitespace at block bottom
+    last_pos = html.rfind('margin:0 0 10px 0')
+    if last_pos != -1:
+        html = html[:last_pos] + 'margin:0 0 0 0' + html[last_pos + len('margin:0 0 10px 0'):]
+    return html
+
 
 # ---------------------------------------------------------------------------
 # Email HTML template pieces
@@ -164,7 +336,7 @@ def block_button(btn_url, btn_text):
         "font-size:16px;display:inline-block;font-weight:600"
     )
     return (
-        '<tr><td align="center" bgcolor="#ffffff" style="padding:8px 20px;background-color:#ffffff">\n'
+        '<tr><td align="center" bgcolor="#ffffff" style="padding:8px 20px 20px;background-color:#ffffff">\n'
         f'<a href="{btn_url}" target="_blank" style="{btn_style}">{btn_text}</a>\n'
         '</td></tr>'
     )
@@ -390,12 +562,12 @@ def is_section_header(tag):
                 # "Другие источники" contains Unisender email + Voronki TG content
                 'другие источники', 'другие каналы', 'другой источник', 'другие боты',
                 'другой текст']
-    tg_kw = ['телеграм/max', 'телеграм/макс', 'telegram/max', 'тг/max', 'тг/макс', 'тг+max',
-             'телеграм бот', 'тг бот', 'текст для тг', 'для телеграм', 'для тг',
-             'телеграм (', 'тг (', 'тг:', 'тг+мax',
-             'телеграм воронки', 'тг воронки', 'для воронки']
+    tg_kw = ['телеграм/max', 'телеграм/макс', 'telegram/max', 'telegram/макс', 'тг/max', 'тг/макс', 'тг+max',
+             'телеграм бот', 'тг бот', 'telegram бот', 'текст для тг', 'для телеграм', 'для тг',
+             'телеграм (', 'тг (', 'telegram (', 'тг:', 'тг+мax',
+             'телеграм воронки', 'тг воронки', 'telegram воронки', 'для воронки']
     tg_only_kw = ['телеграм:', 'telegram:']
-    subject_kw = ['тема письма', 'тема:', 'subject:']
+    subject_kw = ['тема письма', 'тема:', 'темы:', 'subject:']
     preview_kw = ['превью:', 'прехедер:', 'preview:', 'preheader:']
     meta_kw = ['кампания:', 'каналы ', 'каналы(', 'сегмент ', 'сегмент(',
                'исключаем', 'включаем', 'от кого:', 'from:']
@@ -662,7 +834,7 @@ def parse_doc_html(html_content):
         if not subject or not preview:
             txt = get_text_content(tag).strip()
             txt_lower = txt.lower()
-            for kw in ['тема письма:', 'тема:', 'subject:']:
+            for kw in ['тема письма:', 'тема:', 'темы:', 'subject:']:
                 if txt_lower.startswith(kw) and not subject:
                     subject = re.sub(r'^[^:]+:\s*', '', txt, count=1).strip()
                     return
@@ -707,7 +879,9 @@ def parse_doc_html(html_content):
     def tags_to_html(tags):
         parts = []
         for t in tags:
-            txt = t.get_text(strip=True)
+            # Replace non-breaking spaces before checking emptiness —
+            # Google Docs often exports empty paragraphs as <p><span>&nbsp;</span></p>
+            txt = t.get_text(strip=True).replace('\xa0', '').strip()
             if txt or t.name in ('ul', 'ol', 'table'):
                 parts.append(str(t))
         return '\n'.join(parts)
@@ -719,6 +893,17 @@ def parse_doc_html(html_content):
         if html:
             email_variant_list.append({'name': sub['name'], 'html': html})
 
+    # Reorder: variant with "1 клик" in name must always be at index 0 (email_gc),
+    # regardless of order in the source document.
+    if len(email_variant_list) > 1:
+        one_klik_idx = next(
+            (i for i, v in enumerate(email_variant_list)
+             if 'клик' in v['name'].lower() or 'klik' in v['name'].lower()),
+            None
+        )
+        if one_klik_idx is not None and one_klik_idx != 0:
+            email_variant_list.insert(0, email_variant_list.pop(one_klik_idx))
+
     if not email_variant_list:
         email_html = ''
         email_variants = None
@@ -726,7 +911,7 @@ def parse_doc_html(html_content):
         email_html = email_variant_list[0]['html']
         email_variants = None
     else:
-        # Default to first variant (usually "1 клик" with GC vars)
+        # Default to first variant (guaranteed to be "1 клик" / email_gc after reorder above)
         email_html = email_variant_list[0]['html']
         email_variants = email_variant_list
 
@@ -737,6 +922,19 @@ def parse_doc_html(html_content):
         if html:
             tg_variant_list.append({'name': sub['name'], 'html': html})
 
+    # Reorder: variant with "1 клик" must be at index 0 (TG ГК = основной бот),
+    # and general/"общее"/"макс"/"другие источники" variant at index 1 (Воронки/bots).
+    if len(tg_variant_list) > 1:
+        one_klik_idx = next(
+            (i for i, v in enumerate(tg_variant_list)
+             if 'клик' in v['name'].lower() or 'klik' in v['name'].lower()),
+            None
+        )
+        if one_klik_idx is not None and one_klik_idx != 0:
+            # Move the "1 клик" variant to position 0
+            item = tg_variant_list.pop(one_klik_idx)
+            tg_variant_list.insert(0, item)
+
     if not tg_variant_list:
         tg_html = ''
         tg_variants = None
@@ -744,8 +942,8 @@ def parse_doc_html(html_content):
         tg_html = tg_variant_list[0]['html']
         tg_variants = None
     else:
-        # Default to last variant (usually "1 клик" with GC vars)
-        tg_html = tg_variant_list[-1]['html']
+        # index=0 → TG ГК ("1 клик" основной бот), index=1 → Воронки/bots (другие источники)
+        tg_html = tg_variant_list[0]['html']
         tg_variants = tg_variant_list
 
     # Fallback: if only one content block found, use it for both
@@ -825,10 +1023,15 @@ def elem_inner_html_for_email(tag, _in_bold=False, link_color='#1445ea'):
                     inner = f'<i>{inner}</i>'
                 parts.append(inner)
             elif name == 'br':
-                parts.append('<br>')
+                br_style = child.get('style', '').replace(' ', '')
+                if 'display:none' not in br_style:
+                    parts.append('<br>')
             else:
                 inner = elem_inner_html_for_email(child, _in_bold=_in_bold, link_color=link_color)
                 parts.append(inner)
+    # Strip trailing <br> tags from parts — Google Docs artifacts at element ends
+    while parts and parts[-1] == '<br>':
+        parts.pop()
     return ''.join(parts)
 
 # Matches {first_name} GC variable (plain text, not inside HTML tags)
@@ -852,9 +1055,9 @@ def _strip_first_name(text):
     if n:
         text = _cap(text)
 
-    # ", {first_name}" or " {first_name}" in the middle → remove cleanly
-    text = re.sub(r'\s*,\s*' + _FIRST_NAME_VAR, '', text)
-    text = re.sub(r'\s+' + _FIRST_NAME_VAR, '', text)
+    # ", {first_name}" or " {first_name}," in the middle → remove variable + surrounding punctuation
+    text = re.sub(r'\s*,\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?', '', text)
+    text = re.sub(r'\s+' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?', ' ', text)
 
     # Any remaining bare occurrence
     text = re.sub(_FIRST_NAME_VAR, '', text)
@@ -868,14 +1071,32 @@ def _strip_first_name(text):
 
 def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18, color='#333333', link_color='#1445ea'):
     """Convert a single <p> or heading tag to an email <p> with styles."""
+    # Fast pre-check: if the tag has no visible text (even with spans/nbsp), skip it
+    tag_plain = tag.get_text().replace('\xa0', '').replace(' ', '').strip()
+    if not tag_plain:
+        return None
+    # Skip standalone footnote references like [a], [b], [d], [1] — Google Docs link annotations
+    if _FOOTNOTE_REF_RE.match(tag_plain):
+        return None
     inner = elem_inner_html_for_email(tag, link_color=link_color)
     inner = inner.strip()
-    if not inner:
+    # Strip leading/trailing <br> tags — Google Docs artifacts at paragraph boundaries
+    inner = re.sub(r"^(\s*<br\s*/?>\s*)+", "", inner)
+    inner = re.sub(r"(\s*<br\s*/?>\s*)+$", "", inner)
+    inner = inner.strip()
+    # Treat &nbsp;-only and <br>-only paragraphs (Google Docs empty lines) as empty
+    if not inner or inner.replace('\xa0', '').replace('&nbsp;', '').replace('<br>', '').replace('<br/>', '').strip() == '':
         return None
 
-    # Strip {first_name} GC variable for channels that need it
+    # Normalize GC variables that Google Docs may split across formatting spans:
+    # e.g., {<b>first_name</b>} → {first_name}
+    inner = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', inner)
+
+    # Strip/rename {first_name} GC variable for channels that need it
     if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
         inner = _strip_first_name(inner)
+    if CHANNELS.get(channel_key, {}).get('rename_first_name'):
+        inner = inner.replace('{first_name}', '{firstName}')
     if not inner:
         return None
 
@@ -904,8 +1125,13 @@ def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18,
         )
     return f'<p style="{style}">{inner}</p>'
 
-# Matches paragraph whose entire text is [BUTTON TEXT]
-_BTN_BRACKET_RE = re.compile(r'^\s*\[([^\]]+)\]\s*$', re.DOTALL)
+# Matches paragraph whose entire text is [BUTTON TEXT] or EMOJI [BUTTON TEXT].
+# Group 1 = optional emoji/non-word prefix, Group 2 = text inside brackets.
+_BTN_BRACKET_RE = re.compile(r'^\s*([^\w\[\]]*)\[([^\]]+)\]\s*$', re.DOTALL)
+
+# Matches standalone footnote reference paragraphs like [a], [b], [d], [1], [2]
+# These are Google Docs link annotations, not email content
+_FOOTNOTE_REF_RE = re.compile(r'^\[[a-z0-9]{1,3}\]$', re.IGNORECASE)
 
 _CHECKMARKS = ['✅', '❌', '☑', '☒']
 _FEATURE_EMOJI = ['💎', '🎁', '🎯', '📌', '🔑', '⭐', '🏆', '💡', '🚀', '📅', '🗓', '📢']
@@ -930,27 +1156,40 @@ def render_block_from_tags(tags, channel_key, campaign, date):
     for tag in tags:
         tag_text = tag.get_text(strip=True)
 
-        # Case 1: the whole tag is [BUTTON TEXT]
+        # Case 1: the whole tag is [BUTTON TEXT] or EMOJI [BUTTON TEXT]
         m = _BTN_BRACKET_RE.match(tag_text)
         if m:
-            btn_label = m.group(1).strip()
+            prefix = m.group(1).strip()
+            btn_inner = m.group(2).strip()
+            btn_label = f'{prefix} {btn_inner}'.strip() if prefix else btn_inner
             a = tag.find('a', href=True)
             items.append({'kind': 'btn', 'text': btn_label, 'url': a.get('href', '#') if a else '#'})
             continue
 
-        # Case 2: an <a> inside the tag wraps [BUTTON TEXT]
+        # Case 2: an <a> inside the tag wraps [BUTTON TEXT] (possibly with emoji before <a>)
         found_btn_anchor = False
         for a in tag.find_all('a', href=True):
-            if _BTN_BRACKET_RE.match(a.get_text(strip=True)):
-                m2 = _BTN_BRACKET_RE.match(a.get_text(strip=True))
-                btn_label = m2.group(1).strip()
+            m2 = _BTN_BRACKET_RE.match(a.get_text(strip=True))
+            if m2:
+                a_prefix = m2.group(1).strip()
+                btn_inner = m2.group(2).strip()
+                btn_label = f'{a_prefix} {btn_inner}'.strip() if a_prefix else btn_inner
+                # Also pick up any emoji-only text sibling that precedes the <a> in the tag
+                if not a_prefix:
+                    full_m = _BTN_BRACKET_RE.match(tag.get_text(strip=True))
+                    if full_m and full_m.group(1).strip():
+                        btn_label = f'{full_m.group(1).strip()} {btn_label}'.strip()
                 btn_href = a.get('href', '#')
                 tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
                 if tag_copy:
                     for ba in tag_copy.find_all('a', href=True):
                         if _BTN_BRACKET_RE.match(ba.get_text(strip=True)):
                             ba.decompose()
-                    if tag_copy.get_text(strip=True):
+                    remaining = tag_copy.get_text(strip=True)
+                    # Remove the emoji prefix that's now part of the button label
+                    if btn_label and remaining and remaining.startswith(m2.group(1).strip()):
+                        remaining = remaining[len(m2.group(1).strip()):].strip()
+                    if remaining:
                         items.append({'kind': 'tag', 'tag': tag_copy})
                 items.append({'kind': 'btn', 'text': btn_label, 'url': btn_href})
                 found_btn_anchor = True
@@ -1032,7 +1271,7 @@ def render_block_from_tags(tags, channel_key, campaign, date):
                 ph = tag_to_email_p(item['tag'], channel_key, campaign, date, color='#ffffff', link_color='#e1fb52')
                 if ph:
                     text_parts.append(ph)
-        paragraphs_html = '\n'.join(text_parts)
+        paragraphs_html = strip_trailing_empty_paragraphs('\n'.join(text_parts))
 
         first_btn = next((i for i in items if i['kind'] == 'btn'), None)
         btn_text_meta = first_btn['text'] if first_btn else ''
@@ -1065,7 +1304,11 @@ def render_block_from_tags(tags, channel_key, campaign, date):
             if ph:
                 p_parts.append(ph)
 
-    paragraphs_html = '\n'.join(p_parts)
+    paragraphs_html = strip_trailing_empty_paragraphs('\n'.join(p_parts))
+
+    # If all tags turned out to be empty (e.g. &nbsp;-only paragraphs), skip this block entirely
+    if not paragraphs_html.strip():
+        return None, None
 
     if has_checkmarks:
         meta = {'type': 'block_grey', 'paragraphs_html': paragraphs_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': preview_text}
@@ -1092,11 +1335,14 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18):
     buttons = []
     for tag in ctags:
         text = tag.get_text(strip=True)
-        # Detect [BUTTON TEXT] hyperlink pattern → extract as separate button
-        if re.match(r'^\[.{3,100}\]$', text):
+        # Detect [BUTTON TEXT] or EMOJI [BUTTON TEXT] hyperlink pattern
+        m_btn = _BTN_BRACKET_RE.match(text)
+        if m_btn:
             link = tag.find('a', href=True)
             if link:
-                btn_text = text.strip('[]')
+                prefix = m_btn.group(1).strip()
+                btn_inner = m_btn.group(2).strip()
+                btn_text = f'{prefix} {btn_inner}'.strip() if prefix else btn_inner
                 raw_url = decode_google_redirect(link.get('href', '#'))
                 btn_url = build_utm_url(raw_url, channel_key, campaign, date)
                 buttons.append((btn_text, btn_url))
@@ -1104,7 +1350,12 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18):
         if tag.name in ('ul', 'ol'):
             for li in tag.find_all('li'):
                 inner = elem_inner_html_for_email(li)
+                inner = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', inner)
                 inner = inject_utm_in_html(inner, channel_key, campaign, date)
+                if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+                    inner = _strip_first_name(inner)
+                if CHANNELS.get(channel_key, {}).get('rename_first_name'):
+                    inner = inner.replace('{first_name}', '{firstName}')
                 lh = round(font_size * 1.5)
                 s = (f"margin:0 0 6px 0;padding-left:20px;"
                      f"font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
@@ -1129,6 +1380,10 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
     pending_tags = []
     user_img_idx = [0]  # tracks which user-provided image URL to use next
 
+    # Normalize subject for deduplication — skip if first paragraph repeats it
+    _subject_norm = re.sub(r'\s+', ' ', subject or '').strip()
+    _first_content_checked = [False]
+
     def flush_pending():
         if not pending_tags:
             return
@@ -1140,9 +1395,15 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
     def process_element(el):
         if not hasattr(el, 'name') or el.name is None:
             return
+        # Skip first paragraph if it duplicates the subject line (common in GC docs)
+        if not _first_content_checked[0] and _subject_norm and el.name not in ('div',):
+            el_txt = re.sub(r'\s+', ' ', el.get_text(strip=True).replace('\xa0', '')).strip()
+            if el_txt:
+                _first_content_checked[0] = True
+                if el_txt == _subject_norm:
+                    return  # duplicated subject — skip this element
         if el.name == 'table':
-            flush_pending()
-            # Detect Google Docs 2-column table (first row with exactly 2 cells)
+            # Detect 2-column table structure first (before any flush)
             tbody = el.find('tbody') or el
             trows = tbody.find_all('tr', recursive=False)
             two_col_cells = None
@@ -1152,50 +1413,71 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                     two_col_cells = rc
                     break
 
-            if two_col_cells:
-                left_html,  left_btns  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16)
-                right_html, right_btns = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16)
-                l_img = two_col_cells[0].find('img')
-                r_img = two_col_cells[1].find('img')
-                l_src = l_img.get('src', '') if l_img else ''
-                r_src = r_img.get('src', '') if r_img else ''
+            if not two_col_cells:
+                # Normal table: check for CTA button before deciding whether to flush
+                inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
+                         if t.get_text(strip=True) and not _is_reklama(t)]
+                if inner and pending_tags and any(
+                        _BTN_BRACKET_RE.match(t.get_text(strip=True)) for t in inner):
+                    # Table has a CTA button — merge pre-table paragraphs into the same block
+                    combined = list(pending_tags) + inner
+                    pending_tags.clear()
+                    row, meta = render_block_from_tags(combined, channel_key, campaign, date)
+                    if row:
+                        raw_blocks.append((row, meta))
+                else:
+                    flush_pending()
+                    if inner:
+                        row, meta = render_block_from_tags(inner, channel_key, campaign, date)
+                        if row:
+                            raw_blocks.append((row, meta))
+                return
 
-                row = None
-                meta = None
-                if left_html.strip() and right_html.strip():
-                    pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
-                    meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_html,
-                            'col2_html': right_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                    row = block_2col_text_text(left_html, right_html)
-                elif l_src and not left_html.strip() and right_html.strip():
-                    img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else l_src
-                    if user_img_idx[0] < len(images):
-                        user_img_idx[0] += 1
-                    pv = BeautifulSoup(right_html, 'lxml').get_text(strip=True)[:50]
-                    meta = {'type': 'block_2col_img_text', 'paragraphs_html': right_html,
-                            'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                    row = block_2col_img_text(img_to_use, right_html)
-                elif r_src and not right_html.strip() and left_html.strip():
-                    img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else r_src
-                    if user_img_idx[0] < len(images):
-                        user_img_idx[0] += 1
-                    pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
-                    meta = {'type': 'block_2col_text_img', 'paragraphs_html': left_html,
-                            'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                    row = block_2col_text_img(left_html, img_to_use)
+            # 2-column table: flush pending first, then process
+            flush_pending()
+            left_html,  left_btns  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16)
+            right_html, right_btns = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16)
+            l_img = two_col_cells[0].find('img')
+            r_img = two_col_cells[1].find('img')
+            l_src = l_img.get('src', '') if l_img else ''
+            r_src = r_img.get('src', '') if r_img else ''
 
-                if row:
-                    raw_blocks.append((row, meta))
-                    for btn_text, btn_url in left_btns + right_btns:
-                        raw_blocks.append((
-                            block_button(btn_url, btn_text),
-                            {'type': 'block_button', 'paragraphs_html': '',
-                             'btn_text': btn_text, 'btn_url_utm': btn_url,
-                             'preview_text': btn_text[:50]}
-                        ))
-                    return
+            row = None
+            meta = None
+            if left_html.strip() and right_html.strip():
+                pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
+                meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_html,
+                        'col2_html': right_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                row = block_2col_text_text(left_html, right_html)
+            elif l_src and not left_html.strip() and right_html.strip():
+                img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else l_src
+                if user_img_idx[0] < len(images):
+                    user_img_idx[0] += 1
+                pv = BeautifulSoup(right_html, 'lxml').get_text(strip=True)[:50]
+                meta = {'type': 'block_2col_img_text', 'paragraphs_html': right_html,
+                        'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                row = block_2col_img_text(img_to_use, right_html)
+            elif r_src and not right_html.strip() and left_html.strip():
+                img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else r_src
+                if user_img_idx[0] < len(images):
+                    user_img_idx[0] += 1
+                pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
+                meta = {'type': 'block_2col_text_img', 'paragraphs_html': left_html,
+                        'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                row = block_2col_text_img(left_html, img_to_use)
 
-            # Normal table: extract all text, skip РЕКЛАМА
+            if row:
+                raw_blocks.append((row, meta))
+                for btn_text, btn_url in left_btns + right_btns:
+                    raw_blocks.append((
+                        block_button(btn_url, btn_text),
+                        {'type': 'block_button', 'paragraphs_html': '',
+                         'btn_text': btn_text, 'btn_url_utm': btn_url,
+                         'preview_text': btn_text[:50]}
+                    ))
+                return
+
+            # 2-col detected but no pattern matched — fall back to normal table rendering
             inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                      if t.get_text(strip=True) and not _is_reklama(t)]
             if inner:
@@ -1206,8 +1488,14 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             if el.get_text(strip=True) and not _is_reklama(el):
                 pending_tags.append(el)
         elif el.name == 'p':
-            raw_txt = el.get_text(strip=True)
+            # Normalize non-breaking spaces — Google Docs empty paragraphs often
+            # contain only &nbsp; which get_text sees as non-empty text.
+            raw_txt = el.get_text(strip=True).replace('\xa0', '').strip()
             if _is_reklama(el):
+                return
+            # Treat standalone footnote references [a], [b], [d], [1] as block separators
+            if raw_txt and _FOOTNOTE_REF_RE.match(raw_txt):
+                flush_pending()
                 return
             if raw_txt:
                 pending_tags.append(el)
@@ -1221,21 +1509,65 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
         process_element(child)
     flush_pending()
 
-    # Auto-alternate consecutive same-type simple blocks to avoid visual repetition
+    # Auto-alternate simple blocks in a 3-step cycle: white → grey → dotted → white → …
+    # Non-alternatable blocks influence cycle position:
+    #   CTA (blue)  → resets cycle to 0 (next plain block starts at white)
+    #   2-col/image → count as white, so next plain block becomes grey (pos=1)
+    #   button      → transparent, doesn't affect the cycle
     ALTERNATABLE = {'block_white', 'block_grey', 'block_dotted'}
-    for i in range(1, len(raw_blocks)):
-        prev_meta = raw_blocks[i - 1][1]
+    _CYCLE = ['block_white', 'block_grey', 'block_dotted']
+    _CYCLE_FN = {'block_white': block_white, 'block_grey': block_grey, 'block_dotted': block_dotted}
+    cycle_pos = 0
+    for i in range(len(raw_blocks)):
         curr_html, curr_meta = raw_blocks[i]
-        if not prev_meta or not curr_meta:
+        if not curr_meta:
             continue
-        prev_type = prev_meta.get('type', '')
         curr_type = curr_meta.get('type', '')
-        if prev_type == curr_type and curr_type in ALTERNATABLE:
-            new_type = 'block_grey' if curr_type == 'block_white' else 'block_white'
-            curr_meta['type'] = new_type
-            ph = curr_meta.get('paragraphs_html', '')
-            new_html = block_grey(ph) if new_type == 'block_grey' else block_white(ph)
-            raw_blocks[i] = (new_html, curr_meta)
+        if curr_type in ALTERNATABLE:
+            new_type = _CYCLE[cycle_pos % 3]
+            cycle_pos += 1
+            if new_type != curr_type:
+                ph = curr_meta.get('paragraphs_html', '')
+                curr_meta['type'] = new_type
+                raw_blocks[i] = (_CYCLE_FN[new_type](ph), curr_meta)
+        elif curr_type == 'block_blue_cta':
+            cycle_pos = 0  # next plain block starts fresh at white
+        elif curr_type.startswith('block_2col') or curr_type == 'block_image':
+            cycle_pos = 1  # 2-col counts as white → next plain block is grey
+        # block_button is transparent — doesn't affect the cycle
+
+    # Handle adjacent block_blue_cta: convert the second into block_white + block_button
+    final_blocks = []
+    i = 0
+    while i < len(raw_blocks):
+        row_html, meta = raw_blocks[i]
+        if (meta and meta.get('type') == 'block_blue_cta' and
+                i + 1 < len(raw_blocks) and
+                raw_blocks[i + 1][1] and raw_blocks[i + 1][1].get('type') == 'block_blue_cta'):
+            final_blocks.append((row_html, meta))
+            next_meta = raw_blocks[i + 1][1]
+            ph = next_meta.get('paragraphs_html', '')
+            btn_text = next_meta.get('btn_text', '')
+            btn_url = next_meta.get('btn_url_utm', '#')
+            if ph:
+                dark_ph = ph.replace('color:#ffffff', 'color:#333333').replace('color:#e1fb52', 'color:#1445ea')
+                final_blocks.append((block_white(dark_ph), {**next_meta, 'type': 'block_white', 'paragraphs_html': dark_ph}))
+            final_blocks.append((
+                block_button(btn_url, btn_text),
+                {'type': 'block_button', 'paragraphs_html': '',
+                 'btn_text': btn_text, 'btn_url_utm': btn_url, 'preview_text': btn_text[:50]}
+            ))
+            i += 2
+        else:
+            final_blocks.append((row_html, meta))
+            i += 1
+    raw_blocks = final_blocks
+
+    # Log block structure for debugging
+    block_summary = [(m.get('type','?'), m.get('btn_text','')[:20], m.get('preview_text','')[:40])
+                     for _, m in raw_blocks if m]
+    logging.debug(f"email blocks [{channel_key}]: {block_summary}")
+
 
     # Add default spacer before footer
     spacer_meta = {'type': 'block_spacer', 'height': 20, 'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '', 'preview_text': 'Отступ'}
@@ -1438,8 +1770,13 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
         if not inner:
             continue
 
+        # Normalize spaces inside { first_name } before stripping
+        inner = re.sub(r'\{\s*first_name\s*\}', '{first_name}', inner)
         if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+            # Handle {first_name} glued to bold marker (e.g. **{first_name}, text → **text)
+            inner = re.sub(r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*', '**', inner)
             inner = _strip_first_name(inner)
+            inner = re.sub(r'\*{4,}', '', inner).strip()  # clean up empty **..** remnants
         if not inner:
             continue
 
@@ -1449,6 +1786,19 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
         result_parts.append(inner)
 
     text = '\n\n'.join(result_parts)
+    # Normalize { first_name } (with spaces/newlines from Google Docs multiline export),
+    # then strip per-paragraph to avoid eating \n\n separators with \s+ in _strip_first_name.
+    if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+        paragraphs = text.split('\n\n')
+        cleaned = []
+        for para in paragraphs:
+            para = re.sub(r'\{\s*first_name\s*\}', '{first_name}', para)
+            para = re.sub(r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*', '**', para)
+            para = _strip_first_name(para).strip()
+            para = re.sub(r'\*{4,}', '', para).strip()
+            if para:
+                cleaned.append(para)
+        text = '\n\n'.join(cleaned)
     text += '\n\nРЕКЛАМА ООО "ЗЕРОКОДЕР"\nИНН 9715401631'
 
     # De-duplicate links, apply UTM
@@ -1499,6 +1849,12 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date):
 
     output = '\n'.join(result_parts)
     output = inject_utm_in_html(output, channel_key, campaign, date)
+    # Normalize GC variables split across bold/italic spans: {<b>first_name</b>} → {first_name}
+    output = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', output)
+    if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+        output = _strip_first_name(output)
+    if CHANNELS.get(channel_key, {}).get('rename_first_name'):
+        output = output.replace('{first_name}', '{firstName}')
 
     # Legal notice
     output += '\n<p>&nbsp;</p>\n<p>РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>\n<p>ИНН 9715401631</p>'
@@ -1541,19 +1897,27 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date):
 
     output = '\n\n'.join(result_parts)
     output = inject_utm_in_html(output, channel_key, campaign, date)
+    # Normalize GC variables split across bold/italic spans: {<b>first_name</b>} → {first_name}
+    output = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', output)
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
         output = output.replace('{first_name}', '{firstName}')
     output += '\n\nРЕКЛАМА ООО "ЗЕРОКОДЕР"\nИНН 9715401631'
     return output
 
-def _pick_tg_src(ch_info, tg_variants_list, tg_section_html, email_section_html):
+def _pick_tg_src(ch_info, tg_variants_list, tg_section_html, email_section_html, email_variants=None):
     """Return the correct TG HTML source for a channel based on tg_variant_index."""
     variant_idx = ch_info.get('tg_variant_index')
     if variant_idx is not None and tg_variants_list and isinstance(tg_variants_list, list):
         if variant_idx < len(tg_variants_list):
             return tg_variants_list[variant_idx]['html']
         return tg_variants_list[-1]['html']
-    return tg_section_html or email_section_html
+    # No TG variants: use dedicated TG section if present
+    if tg_section_html:
+        return tg_section_html
+    # Fall back to matching email variant by index so Voronki/bots get email_unisender content
+    if email_variants and isinstance(email_variants, list) and variant_idx and variant_idx < len(email_variants):
+        return email_variants[variant_idx]['html']
+    return email_section_html
 
 
 # ---------------------------------------------------------------------------
@@ -1563,6 +1927,37 @@ def _pick_tg_src(ch_info, tg_variants_list, tg_section_html, email_section_html)
 @app.route('/')
 def index():
     return render_template('index.html', channels=CHANNELS)
+
+_TG_HEADER_RE = re.compile(
+    r'^(?:telegram|тг|телеграм|tg|max|нейрокот|помощник|push)\s*[\(\[/\s]',
+    re.IGNORECASE,
+)
+
+def _strip_ai_tg_header(text):
+    """Remove leading lines that are TG section headers (e.g. 'Telegram (в 1 клик)')."""
+    if not text:
+        return text
+    lines = text.split('\n')
+    while lines:
+        line = lines[0].strip()
+        if len(line) < 80 and _TG_HEADER_RE.match(line):
+            lines.pop(0)
+        else:
+            break
+    return '\n'.join(lines).strip()
+
+
+@app.route('/api/debug-log', methods=['GET'])
+def api_debug_log():
+    """Return last 100 lines of debug.log."""
+    log_path = os.path.join(os.path.dirname(__file__), 'debug.log')
+    try:
+        with open(log_path, encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        return jsonify({'lines': lines[-100:]})
+    except FileNotFoundError:
+        return jsonify({'lines': ['(лог пустой — нажми Сгенерировать сначала)']})
+
 
 @app.route('/api/parse', methods=['POST'])
 def api_parse():
@@ -1598,7 +1993,87 @@ def api_parse():
     except Exception as e:
         return jsonify({'error': f'Ошибка разбора документа: {str(e)}'}), 500
 
-    return jsonify({
+    # Try AI-assisted parsing to enrich / fix sections
+    ai_result = None
+    ai_error = None
+    try:
+        ai_result = parse_with_ai(html_content)
+    except Exception as e:
+        ai_error = str(e)
+
+    # Merge AI results into parsed: AI wins for subject/preview if keyword parser missed them,
+    # and provides separate channel variants that keyword parser may not have detected.
+    if ai_result:
+        if not parsed['subject'] and ai_result.get('subject'):
+            parsed['subject'] = ai_result['subject']
+        if not parsed['preview'] and ai_result.get('preview'):
+            parsed['preview'] = ai_result['preview']
+
+        if not parsed['email_html'] and ai_result.get('email_gc'):
+            parsed['email_html'] = ai_result['email_gc']
+
+        if (ai_result.get('email_gc') and ai_result.get('email_unisender')
+                and not parsed.get('email_variants') and not parsed['email_html']):
+            parsed['email_variants'] = [
+                {'name': 'Почта (1 клик)', 'html': ai_result['email_gc']},
+                {'name': 'Почта (обычная)', 'html': ai_result['email_unisender']},
+            ]
+
+        tg_main_ai = _strip_ai_tg_header(ai_result.get('tg_main') or '')
+        tg_voronki_ai = _strip_ai_tg_header(ai_result.get('tg_voronki') or '')
+
+        def _looks_like_email(text):
+            """True if the text looks like full email content rather than a short TG message."""
+            if not text:
+                return False
+            # TG messages are short; email content is long
+            if len(text) > 1500:
+                return True
+            # Contains GC offer URL variable — only in email_gc
+            if '{offer_url_' in text:
+                return True
+            # Contains a CTA button marker pattern [ТЕКСТ КНОПКИ]
+            if re.search(r'\[[А-ЯA-ZА-яa-z\s]{5,}\]', text):
+                return True
+            return False
+
+        if _looks_like_email(tg_main_ai):
+            logging.warning(f"AI tg_main looks like email content (len={len(tg_main_ai)}) — discarding")
+            tg_main_ai = ''
+        if _looks_like_email(tg_voronki_ai):
+            logging.warning(f"AI tg_voronki looks like email content (len={len(tg_voronki_ai)}) — discarding")
+            tg_voronki_ai = ''
+
+        if not parsed['tg_html'] and tg_main_ai:
+            parsed['tg_html'] = tg_main_ai
+
+        # Build TG variants only when AI found voronki content and keyword parser didn't
+        # already produce variants. Prefer keyword-parsed tg_html for the main variant
+        # (it has proper <a href> links); AI tg_main is fallback only.
+        if tg_voronki_ai and not parsed.get('tg_variants'):
+            main_tg = parsed.get('tg_html') or tg_main_ai
+            # Only create two variants if voronki content meaningfully differs from main
+            v_short = re.sub(r'\s+', ' ', tg_voronki_ai).strip()[:300]
+            m_short = re.sub(r'\s+', ' ', main_tg or '').strip()[:300]
+            if main_tg and v_short != m_short:
+                parsed['tg_variants'] = [
+                    {'name': 'ТГ (основной)', 'html': main_tg},
+                    {'name': 'ТГ (Воронки)', 'html': tg_voronki_ai},
+                ]
+
+    log_msg = (
+        f"parse: email_html={bool(parsed['email_html'])} "
+        f"email_variants={len(parsed.get('email_variants') or [])} "
+        f"tg_html={bool(parsed['tg_html'])} "
+        f"tg_variants={len(parsed.get('tg_variants') or [])} "
+        f"ai={'ok' if ai_result else ('err:'+ai_error[:60] if ai_error else 'skip')}"
+    )
+    logging.info(log_msg)
+    if ai_result:
+        logging.debug(f"AI tg_main first 200: {str(ai_result.get('tg_main',''))[:200]}")
+        logging.debug(f"AI email_gc first 200: {str(ai_result.get('email_gc',''))[:200]}")
+
+    response_data = {
         'email_html': parsed['email_html'],
         'email_variants': parsed.get('email_variants'),
         'tg_html': parsed['tg_html'],
@@ -1607,7 +2082,13 @@ def api_parse():
         'preview': parsed['preview'],
         'links': parsed['links'][:50],
         'footnotes': parsed['footnotes'],
-    })
+    }
+    if ai_error:
+        response_data['ai_warning'] = f'AI парсинг недоступен: {ai_error}'
+    if ai_result:
+        response_data['ai_sections'] = ai_result
+
+    return jsonify(response_data)
 
 @app.route('/api/generate', methods=['POST'])
 def api_generate():
@@ -1672,7 +2153,7 @@ def api_generate():
                     result[ch_key] = f'<!-- Error generating email: {e} -->'
 
         elif fmt == 'tg_html':
-            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html)
+            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html, email_variants)
             if src:
                 try:
                     result[ch_key] = generate_tg_html(src, ch_key, campaign, date)
@@ -1680,7 +2161,7 @@ def api_generate():
                     result[ch_key] = f'<!-- Error: {e} -->'
 
         elif fmt == 'tg_bots':
-            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html)
+            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html, email_variants)
             if src:
                 try:
                     result[ch_key] = generate_tg_bots(src, ch_key, campaign, date)
@@ -1688,7 +2169,7 @@ def api_generate():
                     result[ch_key] = f'Error: {e}'
 
         elif fmt == 'tg_markdown':
-            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html)
+            src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html, email_variants)
             if src:
                 try:
                     text, links = generate_tg_markdown(src, ch_key, campaign, date)
@@ -1790,6 +2271,52 @@ def api_generate_utm():
         }
 
     return jsonify(result)
+
+GC_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gc_output')
+
+_GC_TRANSPORT = {
+    'email':           'email',
+    'email_unisender': 'email',
+    'tg_gc':           'telegram',
+    'max':             'max',
+}
+
+@app.route('/api/push-to-gc', methods=['POST'])
+def api_push_to_gc():
+    data = request.get_json(force=True)
+    name = data.get('name', '').strip()
+    subject = data.get('subject', '').strip()
+    html = data.get('html', '').strip()
+    channel_key = data.get('channel_key', 'email')
+    transport = _GC_TRANSPORT.get(channel_key, 'email')
+
+    if not name or not html:
+        return jsonify({'error': 'Нужны name и html'}), 400
+
+    os.makedirs(GC_OUTPUT_DIR, exist_ok=True)
+    out_path = os.path.join(GC_OUTPUT_DIR, 'letters_built.json')
+
+    existing = []
+    if os.path.exists(out_path):
+        try:
+            existing = json.loads(open(out_path, encoding='utf-8').read())
+        except Exception:
+            existing = []
+
+    updated = [e for e in existing if e.get('name') != name]
+    updated.append({
+        'name': name,
+        'subject': subject,
+        'html': html,
+        'channel_key': channel_key,
+        'transport': transport,
+    })
+
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(updated, f, ensure_ascii=False, indent=2)
+
+    return jsonify({'ok': True, 'total': len(updated)})
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

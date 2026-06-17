@@ -31,6 +31,7 @@ const TG_HTML_CHANNELS = [
 ];
 
 const TG_MARKDOWN_CHANNELS = ['neurocat'];
+const GC_PUSH_TG_CHANNELS  = ['tg_gc', 'max'];
 
 const CHANNEL_ORDER = [
   'email', 'email_unisender',
@@ -252,6 +253,13 @@ function createEmailPanelEl(key, html, blocks) {
     <div class="tab-toolbar">
       <div class="toolbar-spacer"></div>
       <button class="toolbar-btn" id="copybtn-${key}" onclick="copyChannelHtml('${key}')">📋 Скопировать HTML</button>
+      <button class="toolbar-btn gc-push-btn" id="gcbtn-${key}" onclick="pushToGC('${key}')">🚀 В GetCourse</button>
+    </div>
+    <div class="gc-push-form" id="gcform-${key}" style="display:none">
+      <input type="text" id="gcname-${key}" placeholder="Название рассылки в GetCourse">
+      <button class="toolbar-btn primary-btn" onclick="confirmPushToGC('${key}')">Добавить в список</button>
+      <button class="toolbar-btn" onclick="document.getElementById('gcform-${key}').style.display='none'">Отмена</button>
+      <span class="gc-push-status" id="gcstatus-${key}"></span>
     </div>
     <div class="email-editor-layout">
       <div class="email-preview-col">
@@ -300,11 +308,25 @@ function createTgHtmlPanelEl(key, content) {
   div.className = 'tab-content';
   div.id = `panel-${key}`;
 
+  const gcBtn = GC_PUSH_TG_CHANNELS.includes(key)
+    ? `<button class="toolbar-btn gc-push-btn" id="gcbtn-${key}" onclick="pushToGC('${key}')">🚀 В GetCourse</button>`
+    : '';
+  const gcForm = GC_PUSH_TG_CHANNELS.includes(key)
+    ? `<div class="gc-push-form" id="gcform-${key}" style="display:none">
+        <input type="text" id="gcname-${key}" placeholder="Название рассылки в GetCourse">
+        <button class="toolbar-btn primary-btn" onclick="confirmPushToGC('${key}')">Добавить в список</button>
+        <button class="toolbar-btn" onclick="document.getElementById('gcform-${key}').style.display='none'">Отмена</button>
+        <span class="gc-push-status" id="gcstatus-${key}"></span>
+      </div>`
+    : '';
+
   div.innerHTML = `
     <div class="tab-toolbar">
       <div class="toolbar-spacer"></div>
       <button class="toolbar-btn" onclick="copyChannelHtml('${key}')">📋 Скопировать</button>
+      ${gcBtn}
     </div>
+    ${gcForm}
     <div class="code-preview-split">
       <textarea id="code-${key}" class="code-editor" placeholder="HTML для Telegram..."></textarea>
       <div class="preview-pane tg-preview-pane">
@@ -487,8 +509,8 @@ function createBlockCard(block, idx, channelKey, total) {
         <button type="button" class="fmt-btn" onclick="wrapFmt(this,'u')" title="Подчёркнутый"><u>Ч</u></button>
         <button type="button" class="fmt-btn fmt-link" onclick="wrapFmtLink(this)" title="Ссылка">🔗</button>
         <span class="fmt-sep"></span>
-        <button type="button" class="fmt-btn" onclick="wrapFmtAlign(this,'left')" title="По левому краю">⬅</button>
-        <button type="button" class="fmt-btn" onclick="wrapFmtAlign(this,'center')" title="По центру">↔</button>
+        <button type="button" class="fmt-btn" onclick="wrapFmtAlign(this,'left')" title="По левому краю"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="1" y1="3" x2="13" y2="3"/><line x1="1" y1="7" x2="9" y2="7"/><line x1="1" y1="11" x2="11" y2="11"/></svg></button>
+        <button type="button" class="fmt-btn" onclick="wrapFmtAlign(this,'center')" title="По центру"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="1" y1="3" x2="13" y2="3"/><line x1="3" y1="7" x2="11" y2="7"/><line x1="2" y1="11" x2="12" y2="11"/></svg></button>
       </div>
       ${textareasHtml}
       ${isCta ? `<div class="btn-edit-fields">
@@ -505,7 +527,6 @@ function createBlockCard(block, idx, channelKey, total) {
   const handle = card.querySelector('.drag-handle');
   if (handle) {
     handle.addEventListener('dragstart', e => _dndStart(e, channelKey, idx));
-    handle.addEventListener('drag',      e => { if (e.clientY) _dragMouseY = e.clientY; });
     handle.addEventListener('dragend',   e => _dndEnd(e, channelKey, idx));
   }
   card.addEventListener('dragover', e => _dndOver(e, channelKey, idx));
@@ -598,7 +619,9 @@ let _dragPlaceholder = null;
 
 function _dndAutoScroll() {
   if (!_dragSrcKey) return;
-  const panel = document.querySelector('.output-panel');
+  // The block list lives inside .email-right-col which has its own overflow-y: auto
+  const listEl = document.getElementById(`blocklist-${_dragSrcKey}`);
+  const panel = listEl ? listEl.closest('.email-right-col') : document.querySelector('.output-panel');
   if (panel && _dragMouseY > 0) {
     const r = panel.getBoundingClientRect();
     const zone = 80;
@@ -1067,6 +1090,57 @@ async function reassembleEmail(channelKey) {
 }
 
 // ---------------------------------------------------------------------------
+// Push to GetCourse
+// ---------------------------------------------------------------------------
+
+function _gcContent(channelKey) {
+  if (EMAIL_CHANNELS.includes(channelKey)) return generatedOutputs[channelKey] || '';
+  return document.getElementById(`code-${channelKey}`)?.value || '';
+}
+
+function pushToGC(channelKey) {
+  const form = document.getElementById(`gcform-${channelKey}`);
+  const nameInput = document.getElementById(`gcname-${channelKey}`);
+  const subject = document.getElementById('subjectField')?.value || '';
+  if (!_gcContent(channelKey)) {
+    showError('Сначала сгенерируйте содержимое');
+    return;
+  }
+  nameInput.value = subject;
+  form.style.display = 'flex';
+  nameInput.focus();
+  nameInput.select();
+}
+
+async function confirmPushToGC(channelKey) {
+  const name = document.getElementById(`gcname-${channelKey}`)?.value.trim();
+  const subject = document.getElementById('subjectField')?.value || '';
+  const content = _gcContent(channelKey);
+  const statusEl = document.getElementById(`gcstatus-${channelKey}`);
+
+  if (!name) { statusEl.textContent = 'Введите название'; return; }
+  if (!content) { statusEl.textContent = 'Нет содержимого'; return; }
+
+  statusEl.textContent = 'Сохраняю...';
+  try {
+    const resp = await fetch('/api/push-to-gc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, subject, html: content, channel_key: channelKey }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      statusEl.textContent = `✓ Добавлено! В очереди: ${data.total}`;
+      document.getElementById(`gcform-${channelKey}`).style.display = 'none';
+    } else {
+      statusEl.textContent = '⚠ ' + (data.error || 'Ошибка');
+    }
+  } catch (e) {
+    statusEl.textContent = '⚠ ' + e.message;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // TG variant selector (global)
 // ---------------------------------------------------------------------------
 
@@ -1279,3 +1353,6 @@ function escapeHtml(str) {
 document.addEventListener('DOMContentLoaded', () => {
   // TG preview update for any dynamically created TG panel is handled per-panel
 });
+
+// Track mouse Y during any drag via dragover on document — fires reliably unlike the 'drag' event
+document.addEventListener('dragover', e => { _dragMouseY = e.clientY; });
