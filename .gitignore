@@ -31,3 +31,13 @@ Thumbs.db
 # Claude Code internal (personal settings, not for sharing)
 .claude/settings.json
 .claude/settings.local.json
+
+# Runtime / build artifacts
+debug.log
+fetched_doc.html
+preview_email.html
+gc_output/
+.playwright-mcp/
+
+# Windows-only scripts
+start_server_silent.vbs

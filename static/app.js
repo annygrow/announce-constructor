@@ -112,6 +112,16 @@ async function generateAll() {
         document.getElementById('subjectField').value = parseData.subject || '';
         document.getElementById('previewField').value = parseData.preview || '';
       }
+
+      // Auto-fill campaign and date from document if fields are currently empty
+      const campField = document.getElementById('utmCampaign');
+      const dateField = document.getElementById('utmDate');
+      if (parseData.doc_campaign && !campField.value.trim()) {
+        campField.value = parseData.doc_campaign;
+      }
+      if (parseData.doc_date && !dateField.value.trim()) {
+        dateField.value = parseData.doc_date;
+      }
     }
 
     await _doGenerate();
@@ -128,12 +138,22 @@ async function _doGenerate() {
   const channels = getCheckedChannels();
   const campaign = document.getElementById('utmCampaign').value.trim();
   const date     = document.getElementById('utmDate').value.trim();
+  const segment  = parsedData.segment || '';
   const images   = getImageUrls();
+
+  // Warn if campaign or date are missing
+  const missing = [];
+  if (!campaign) missing.push('тег активности (utm_campaign)');
+  if (!date)     missing.push('дата отправки');
+  if (missing.length > 0) {
+    const ok = confirm(`Не удалось определить: ${missing.join(' и ')}.\n\nUTM-метки будут без этих параметров. Продолжить?`);
+    if (!ok) return;
+  }
 
   const resp = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: parsedData, channels, campaign, date, images }),
+    body: JSON.stringify({ content: parsedData, channels, campaign, date, segment, images }),
   });
 
   const data = await resp.json();
@@ -253,13 +273,6 @@ function createEmailPanelEl(key, html, blocks) {
     <div class="tab-toolbar">
       <div class="toolbar-spacer"></div>
       <button class="toolbar-btn" id="copybtn-${key}" onclick="copyChannelHtml('${key}')">📋 Скопировать HTML</button>
-      <button class="toolbar-btn gc-push-btn" id="gcbtn-${key}" onclick="pushToGC('${key}')">🚀 В GetCourse</button>
-    </div>
-    <div class="gc-push-form" id="gcform-${key}" style="display:none">
-      <input type="text" id="gcname-${key}" placeholder="Название рассылки в GetCourse">
-      <button class="toolbar-btn primary-btn" onclick="confirmPushToGC('${key}')">Добавить в список</button>
-      <button class="toolbar-btn" onclick="document.getElementById('gcform-${key}').style.display='none'">Отмена</button>
-      <span class="gc-push-status" id="gcstatus-${key}"></span>
     </div>
     <div class="email-editor-layout">
       <div class="email-preview-col">
@@ -308,25 +321,11 @@ function createTgHtmlPanelEl(key, content) {
   div.className = 'tab-content';
   div.id = `panel-${key}`;
 
-  const gcBtn = GC_PUSH_TG_CHANNELS.includes(key)
-    ? `<button class="toolbar-btn gc-push-btn" id="gcbtn-${key}" onclick="pushToGC('${key}')">🚀 В GetCourse</button>`
-    : '';
-  const gcForm = GC_PUSH_TG_CHANNELS.includes(key)
-    ? `<div class="gc-push-form" id="gcform-${key}" style="display:none">
-        <input type="text" id="gcname-${key}" placeholder="Название рассылки в GetCourse">
-        <button class="toolbar-btn primary-btn" onclick="confirmPushToGC('${key}')">Добавить в список</button>
-        <button class="toolbar-btn" onclick="document.getElementById('gcform-${key}').style.display='none'">Отмена</button>
-        <span class="gc-push-status" id="gcstatus-${key}"></span>
-      </div>`
-    : '';
-
   div.innerHTML = `
     <div class="tab-toolbar">
       <div class="toolbar-spacer"></div>
       <button class="toolbar-btn" onclick="copyChannelHtml('${key}')">📋 Скопировать</button>
-      ${gcBtn}
     </div>
-    ${gcForm}
     <div class="code-preview-split">
       <textarea id="code-${key}" class="code-editor" placeholder="HTML для Telegram..."></textarea>
       <div class="preview-pane tg-preview-pane">
@@ -1173,12 +1172,13 @@ async function generateUTM() {
 
   const campaign = document.getElementById('utmCampaign').value.trim();
   const date     = document.getElementById('utmDate').value.trim();
+  const segment  = parsedData.segment || '';
 
   try {
     const resp = await fetch('/api/generate-utm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: baseUrl, campaign, date }),
+      body: JSON.stringify({ url: baseUrl, campaign, date, segment }),
     });
     const data = await resp.json();
     if (data.error) { showError(data.error); return; }
@@ -1208,6 +1208,7 @@ function renderUtmResults(data, containerEl, append) {
 async function autoFillUtmFromDocLinks(docUrls) {
   const campaign = document.getElementById('utmCampaign').value.trim();
   const date     = document.getElementById('utmDate').value.trim();
+  const segment  = parsedData.segment || '';
   const container = document.getElementById('utmResults');
   container.innerHTML = '';
 
@@ -1221,7 +1222,7 @@ async function autoFillUtmFromDocLinks(docUrls) {
       const resp = await fetch('/api/generate-utm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, campaign, date }),
+        body: JSON.stringify({ url, campaign, date, segment }),
       });
       const data = await resp.json();
       if (data.error) continue;

@@ -445,7 +445,7 @@ def is_gc_variable(url):
     """Check if a string is a GC template variable like {offer_url_...} or {first_name}"""
     return bool(re.match(r'^\{[^}]+\}$', url.strip()))
 
-def build_utm_url(url, channel_key, campaign, date):
+def build_utm_url(url, channel_key, campaign, date, segment=''):
     """Inject UTM parameters into a URL. Preserves GC variables unchanged."""
     if not url:
         return url
@@ -469,7 +469,9 @@ def build_utm_url(url, channel_key, campaign, date):
         if campaign:
             params['utm_campaign'] = [campaign]
         if ch.get('content'):
-            params['utm_content'] = [ch['content']]
+            _seg_channels = {'email', 'tg_gc'}
+            suffix = ('-dev' if segment == 'dev' else '-ai' if segment == 'ai' else '') if channel_key in _seg_channels else ''
+            params['utm_content'] = [ch['content'] + suffix]
         if date:
             params['utm_term'] = [date]
 
@@ -478,7 +480,7 @@ def build_utm_url(url, channel_key, campaign, date):
     except Exception:
         return url
 
-def inject_utm_in_html(html_text, channel_key, campaign, date, footnote_links=None):
+def inject_utm_in_html(html_text, channel_key, campaign, date, footnote_links=None, segment=''):
     """
     Replace all href="..." values in an HTML string with UTM-injected versions.
     Also replaces footnote anchors [a], [b] etc. with resolved URLs.
@@ -493,7 +495,7 @@ def inject_utm_in_html(html_text, channel_key, campaign, date, footnote_links=No
         if is_gc_variable(raw):
             return match.group(0)
         decoded = decode_google_redirect(raw)
-        utmified = build_utm_url(decoded, channel_key, campaign, date)
+        utmified = build_utm_url(decoded, channel_key, campaign, date, segment)
         return f'href="{utmified}"'
 
     result = re.sub(r'href="([^"]*)"', replace_href, html_text)
@@ -686,6 +688,21 @@ def resolve_comment_refs(html_str, cmnt_url_map):
             sup.decompose()
             continue
 
+        # If prev contains only punctuation (e.g. "."), look one step further back
+        # to find the actual linked word (e.g. "тут") and wrap that instead
+        prev_text = ''
+        if isinstance(prev, NavigableString):
+            prev_text = str(prev).strip()
+        elif hasattr(prev, 'name'):
+            prev_text = prev.get_text().strip()
+
+        if prev_text and re.match(r'^[.,!?;:\-–—]+$', prev_text):
+            word_prev = prev.previous_sibling
+            if word_prev is not None and hasattr(word_prev, 'name') and word_prev.name in ('span', 'b', 'strong', 'i', 'em'):
+                word_prev.wrap(soup.new_tag('a', href=url))
+                sup.decompose()
+                continue
+
         if isinstance(prev, NavigableString):
             # Wrap the text node in <a>
             new_a = soup.new_tag('a', href=url)
@@ -766,6 +783,30 @@ def inline_gdoc_formatting(soup):
             tag['style'] = existing + sep + ';'.join(additions)
 
 
+def fix_orphan_sups(body):
+    """
+    Google Docs sometimes exports <sup> comment markers OUTSIDE the preceding <p> tag:
+      <p>ссылка</p><sup><a href="#cmntN">...</a></sup>
+    walk_blocks only collects <p> tags, so such orphan <sup> elements are silently
+    dropped and their references are never resolved.  Move them inside the preceding
+    block tag so they are serialised together.
+    """
+    for sup in list(body.find_all('sup')):
+        parent = sup.parent
+        if not parent:
+            continue
+        # Only fix when sup is a direct child of a block container (div, body, section…)
+        if parent.name in ('p', 'li', 'td', 'th', 'span', 'b', 'i', 'em', 'strong', 'a', 'u', 's'):
+            continue  # already inline — leave as is
+        # Walk backwards past whitespace text nodes to find the previous sibling
+        prev = sup.previous_sibling
+        while prev is not None and isinstance(prev, NavigableString) and not prev.strip():
+            prev = prev.previous_sibling
+        if prev is not None and hasattr(prev, 'name') and prev.name in ('p', 'li'):
+            sup.extract()
+            prev.append(sup)
+
+
 def parse_doc_html(html_content):
     """
     Parse Google Docs exported HTML and return structured content dict:
@@ -783,6 +824,7 @@ def parse_doc_html(html_content):
     soup = BeautifulSoup(html_content, 'lxml')
     inline_gdoc_formatting(soup)
     body = soup.find('body') or soup
+    fix_orphan_sups(body)
 
     footnotes, cmnt_url_map = extract_footnotes(soup)
     all_links = extract_all_links(soup)
@@ -969,6 +1011,66 @@ def parse_doc_html(html_content):
     elif not tg_html:
         tg_html = email_html
 
+    # Auto-detect segment from planning metadata (the non-email/non-TG part of the document)
+    other_text = ' '.join(t.get_text(strip=True) for t in sections['other']).lower()
+    if re.search(r'\bнейро\b', other_text):
+        segment = 'ai'
+    elif re.search(r'\b(техно|технари|тех[/ ]бизнес)\b', other_text):
+        segment = 'dev'
+    else:
+        segment = ''
+
+    # Auto-detect utm_campaign (тег активности) and date (дата отправки) from planning section.
+    # Two doc formats:
+    #   Format 1 (labeled):   list item = "Тег активности: slug"  /  "Дата отправки: dd.mm"
+    #   Format 2 (positional): list items = ["campaign-slug", "dd.mm", "HH:MM"]
+    from datetime import datetime as _dt
+    def _norm_date(raw):
+        raw = raw.strip()
+        dm = re.match(r'^(\d{1,2}\.\d{1,2})(?:\.(\d{2,4}))?', raw)
+        if dm:
+            y = dm.group(2) or f'{_dt.now().year % 100:02d}'
+            if len(y) == 4:
+                y = y[2:]
+            return f'{dm.group(1)}.{y}'
+        return raw
+
+    doc_campaign = ''
+    doc_date = ''
+
+    # Gather all list items and paragraphs from sections['other']
+    li_items = []  # (text, tag) from ul/ol
+    p_items  = []  # text from p/h*
+    for t in sections['other']:
+        if t.name in ('ul', 'ol'):
+            for li in t.find_all('li'):
+                li_items.append(get_text_content(li).strip())
+        elif t.name in ('p', 'h1', 'h2', 'h3', 'h4'):
+            p_items.append(get_text_content(t).strip())
+
+    all_items = li_items + p_items
+
+    # Pass 1: look for labeled lines (Format 1)
+    for item in all_items:
+        m = re.match(r'^тег\s+активности\s*[:\s]\s*(.+)', item, re.IGNORECASE)
+        if m and not doc_campaign:
+            doc_campaign = m.group(1).strip()
+        m2 = re.match(r'^дата\s+отправки\s*[:\s]\s*(.+)', item, re.IGNORECASE)
+        if m2 and not doc_date:
+            doc_date = _norm_date(m2.group(1).strip())
+
+    # Pass 2: if still missing, use positional heuristic (Format 2)
+    if not doc_campaign or not doc_date:
+        for item in li_items:
+            if not item:
+                continue
+            if re.match(r'^\d{1,2}:\d{2}$', item):  # time like "08:00" — skip
+                continue
+            if re.match(r'^\d{1,2}\.\d{1,2}', item) and not doc_date:
+                doc_date = _norm_date(item)
+            elif not doc_campaign and re.match(r'^[a-zA-Zа-яА-ЯёЁ][a-zA-Zа-яА-ЯёЁ0-9\-_]*$', item):
+                doc_campaign = item
+
     return {
         'email_html': email_html,
         'email_variants': email_variants,
@@ -978,6 +1080,9 @@ def parse_doc_html(html_content):
         'preview': preview,
         'links': all_links,
         'footnotes': footnotes,
+        'segment': segment,
+        'doc_campaign': doc_campaign,
+        'doc_date': doc_date,
     }
 
 # ---------------------------------------------------------------------------
@@ -1046,6 +1151,10 @@ def _strip_first_name(text):
       '{first_name}! Текст'    → 'Текст'
       'Привет {first_name}!'   → 'Привет!'
     """
+    # Google Docs uses \xa0 (non-breaking space) as separator — normalize first
+    # so regex \s patterns can match around the variable.
+    text = text.replace('\xa0', ' ')
+
     def _cap(s):
         s = s.strip()
         return s[0].upper() + s[1:] if s else s
@@ -1055,8 +1164,10 @@ def _strip_first_name(text):
     if n:
         text = _cap(text)
 
-    # ", {first_name}" or " {first_name}," in the middle → remove variable + surrounding punctuation
-    text = re.sub(r'\s*,\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?', '', text)
+    # ", {first_name}" in the middle → remove comma + variable, preserve following punctuation
+    # e.g. "Привет, {first_name}. Я Павел" → "Привет. Я Павел"
+    text = re.sub(r'\s*,\s*' + _FIRST_NAME_VAR, '', text)
+    # " {first_name}," — space before variable, optional separator after
     text = re.sub(r'\s+' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?', ' ', text)
 
     # Any remaining bare occurrence
@@ -1069,7 +1180,7 @@ def _strip_first_name(text):
     return text.strip()
 
 
-def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18, color='#333333', link_color='#1445ea'):
+def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18, color='#333333', link_color='#1445ea', segment=''):
     """Convert a single <p> or heading tag to an email <p> with styles."""
     # Fast pre-check: if the tag has no visible text (even with spans/nbsp), skip it
     tag_plain = tag.get_text().replace('\xa0', '').replace(' ', '').strip()
@@ -1095,13 +1206,21 @@ def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18,
     # Strip/rename {first_name} GC variable for channels that need it
     if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
         inner = _strip_first_name(inner)
+        # Clean up inline HTML tag left with only punctuation after {first_name} removal:
+        # e.g. <b>{first_name}, </b>текст → after strip → <b>, </b>текст → текст
+        inner = re.sub(
+            r'^(\s*<(?:b|i|em|strong|span|u|s)[^>]*>[,!?.;:\s]*</(?:b|i|em|strong|span|u|s)>)+\s*',
+            '', inner
+        )
+        if inner and inner[0].isalpha() and not inner[0].isupper():
+            inner = inner[0].upper() + inner[1:]
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
         inner = inner.replace('{first_name}', '{firstName}')
     if not inner:
         return None
 
     # Inject UTM into hrefs
-    inner = inject_utm_in_html(inner, channel_key, campaign, date)
+    inner = inject_utm_in_html(inner, channel_key, campaign, date, segment=segment)
 
     # Preserve text alignment from the original tag
     tag_style = tag.get('style', '')
@@ -1136,7 +1255,7 @@ _FOOTNOTE_REF_RE = re.compile(r'^\[[a-z0-9]{1,3}\]$', re.IGNORECASE)
 _CHECKMARKS = ['✅', '❌', '☑', '☒']
 _FEATURE_EMOJI = ['💎', '🎁', '🎯', '📌', '🔑', '⭐', '🏆', '💡', '🚀', '📅', '🗓', '📢']
 
-def render_block_from_tags(tags, channel_key, campaign, date):
+def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
     """
     Given a list of BS4 tags from one logical block, build an email table row.
     Detects [BUTTON TEXT] CTAs, checkmark lists, feature emoji, etc.
@@ -1218,7 +1337,7 @@ def render_block_from_tags(tags, channel_key, campaign, date):
                     li_parts = []
                     for li in tag.find_all('li'):
                         inner = elem_inner_html_for_email(li, link_color='#e1fb52')
-                        inner = inject_utm_in_html(inner, channel_key, campaign, date)
+                        inner = inject_utm_in_html(inner, channel_key, campaign, date, segment=segment)
                         li_s = (f"margin:0 0 6px 0;padding-left:20px;{FONT_BASE};"
                                 "line-height:27px;color:#ffffff;font-size:18px")
                         li_parts.append(f'<p style="{li_s}">• {inner}</p>')
@@ -1228,14 +1347,14 @@ def render_block_from_tags(tags, channel_key, campaign, date):
                             + '\n'.join(li_parts) + '\n</td></tr>'
                         )
                 else:
-                    ph = tag_to_email_p(tag, channel_key, campaign, date, color='#ffffff', link_color='#e1fb52')
+                    ph = tag_to_email_p(tag, channel_key, campaign, date, color='#ffffff', link_color='#e1fb52', segment=segment)
                     if ph:
                         inner_rows.append(
                             '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
                             + ph + '\n</td></tr>'
                         )
             elif item['kind'] == 'btn':
-                btn_url_utm = build_utm_url(item['url'], channel_key, campaign, date)
+                btn_url_utm = build_utm_url(item['url'], channel_key, campaign, date, segment)
                 inner_rows.append(
                     '<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
                     f'<a href="{btn_url_utm}" target="_blank" style="{BTN_A_STYLE}">{item["text"]}</a>\n'
@@ -1268,14 +1387,14 @@ def render_block_from_tags(tags, channel_key, campaign, date):
         text_parts = []
         for item in items:
             if item['kind'] == 'tag':
-                ph = tag_to_email_p(item['tag'], channel_key, campaign, date, color='#ffffff', link_color='#e1fb52')
+                ph = tag_to_email_p(item['tag'], channel_key, campaign, date, color='#ffffff', link_color='#e1fb52', segment=segment)
                 if ph:
                     text_parts.append(ph)
         paragraphs_html = strip_trailing_empty_paragraphs('\n'.join(text_parts))
 
         first_btn = next((i for i in items if i['kind'] == 'btn'), None)
         btn_text_meta = first_btn['text'] if first_btn else ''
-        btn_url_meta = build_utm_url(first_btn['url'], channel_key, campaign, date) if first_btn else '#'
+        btn_url_meta = build_utm_url(first_btn['url'], channel_key, campaign, date, segment) if first_btn else '#'
 
         meta = {
             'type': 'block_blue_cta',
@@ -1295,12 +1414,12 @@ def render_block_from_tags(tags, channel_key, campaign, date):
         if tag.name in ('ul', 'ol'):
             for li in tag.find_all('li'):
                 inner = elem_inner_html_for_email(li)
-                inner = inject_utm_in_html(inner, channel_key, campaign, date)
+                inner = inject_utm_in_html(inner, channel_key, campaign, date, segment=segment)
                 s = ("margin:0 0 6px 0;padding-left:20px;font-family:roboto,'helvetica neue',"
                      "helvetica,arial,sans-serif;line-height:27px;color:#333333;font-size:18px")
                 p_parts.append(f'<p style="{s}">• {inner}</p>')
         else:
-            ph = tag_to_email_p(tag, channel_key, campaign, date)
+            ph = tag_to_email_p(tag, channel_key, campaign, date, segment=segment)
             if ph:
                 p_parts.append(ph)
 
@@ -1324,7 +1443,7 @@ def _is_reklama(tag):
     t = tag.get_text(strip=True)
     return _REKLAMA_RE.search(t) or 'ИНН 9715401631' in t
 
-def _cell_para_html(cell, channel_key, campaign, date, font_size=18):
+def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment=''):
     """Extract email-paragraph HTML from a table cell (for 2-col detection).
     Returns (text_html, buttons) where buttons = list of (btn_text, btn_url).
     Paragraphs matching [TEXT] with a hyperlink are extracted as buttons.
@@ -1344,14 +1463,14 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18):
                 btn_inner = m_btn.group(2).strip()
                 btn_text = f'{prefix} {btn_inner}'.strip() if prefix else btn_inner
                 raw_url = decode_google_redirect(link.get('href', '#'))
-                btn_url = build_utm_url(raw_url, channel_key, campaign, date)
+                btn_url = build_utm_url(raw_url, channel_key, campaign, date, segment)
                 buttons.append((btn_text, btn_url))
                 continue
         if tag.name in ('ul', 'ol'):
             for li in tag.find_all('li'):
                 inner = elem_inner_html_for_email(li)
                 inner = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', inner)
-                inner = inject_utm_in_html(inner, channel_key, campaign, date)
+                inner = inject_utm_in_html(inner, channel_key, campaign, date, segment=segment)
                 if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
                     inner = _strip_first_name(inner)
                 if CHANNELS.get(channel_key, {}).get('rename_first_name'):
@@ -1362,12 +1481,12 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18):
                      f"line-height:{lh}px;color:#333333;font-size:{font_size}px")
                 parts.append(f'<p style="{s}">• {inner}</p>')
         else:
-            ph = tag_to_email_p(tag, channel_key, campaign, date, font_size=font_size)
+            ph = tag_to_email_p(tag, channel_key, campaign, date, font_size=font_size, segment=segment)
             if ph:
                 parts.append(ph)
     return '\n'.join(parts), buttons
 
-def generate_email_html(email_section_html, channel_key, campaign, date, images, subject=''):
+def generate_email_html(email_section_html, channel_key, campaign, date, images, subject='', segment=''):
     """
     Build the complete email HTML from parsed section HTML.
     Each top-level <table> in the source maps to one distinct block.
@@ -1387,7 +1506,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
     def flush_pending():
         if not pending_tags:
             return
-        row, meta = render_block_from_tags(list(pending_tags), channel_key, campaign, date)
+        row, meta = render_block_from_tags(list(pending_tags), channel_key, campaign, date, segment)
         if row:
             raw_blocks.append((row, meta))
         pending_tags.clear()
@@ -1417,26 +1536,32 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 # Normal table: check for CTA button before deciding whether to flush
                 inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                          if t.get_text(strip=True) and not _is_reklama(t)]
-                if inner and pending_tags and any(
-                        _BTN_BRACKET_RE.match(t.get_text(strip=True)) for t in inner):
-                    # Table has a CTA button — merge pre-table paragraphs into the same block
+                has_inner_btn = bool(inner and any(
+                    _BTN_BRACKET_RE.match(t.get_text(strip=True)) for t in inner))
+                has_inner_text = bool(inner and any(
+                    not _BTN_BRACKET_RE.match(t.get_text(strip=True)) for t in inner))
+
+                if has_inner_btn and pending_tags and not has_inner_text:
+                    # Table has ONLY buttons (no body text of its own) —
+                    # merge pre-table paragraphs into the CTA block
                     combined = list(pending_tags) + inner
                     pending_tags.clear()
-                    row, meta = render_block_from_tags(combined, channel_key, campaign, date)
+                    row, meta = render_block_from_tags(combined, channel_key, campaign, date, segment)
                     if row:
                         raw_blocks.append((row, meta))
                 else:
+                    # Table has its own body text, or no button — flush pending separately
                     flush_pending()
                     if inner:
-                        row, meta = render_block_from_tags(inner, channel_key, campaign, date)
+                        row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment)
                         if row:
                             raw_blocks.append((row, meta))
                 return
 
             # 2-column table: flush pending first, then process
             flush_pending()
-            left_html,  left_btns  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16)
-            right_html, right_btns = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16)
+            left_html,  left_btns  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16, segment=segment)
+            right_html, right_btns = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16, segment=segment)
             l_img = two_col_cells[0].find('img')
             r_img = two_col_cells[1].find('img')
             l_src = l_img.get('src', '') if l_img else ''
@@ -1481,7 +1606,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                      if t.get_text(strip=True) and not _is_reklama(t)]
             if inner:
-                row, meta = render_block_from_tags(inner, channel_key, campaign, date)
+                row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment)
                 if row:
                     raw_blocks.append((row, meta))
         elif el.name in ('h1', 'h2', 'h3', 'h4', 'ul', 'ol'):
@@ -1663,6 +1788,10 @@ def clean_tag_for_tg(tag, _in_bold=False):
 _REKLAMA_RE        = re.compile(r'реклама\s+ооо', re.IGNORECASE)
 _SINGLE_PUNCT_BOLD = re.compile(r'\*\*([!?.,;:])\*\*')
 _ANY_BOLD_RE       = re.compile(r'\*\*([^*\n]+?)\*\*')
+# Detect emoji immediately before a ** bold marker (Neurocat can't render bold after emoji)
+_EMOJI_BEFORE_DSTAR_RE = re.compile(
+    r'[☀-➿\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF\U00002702-\U000027B0] *\*\*'
+)
 
 
 def _postprocess_md(text):
@@ -1736,7 +1865,7 @@ def clean_tag_for_tg_markdown(tag, links_collector, _in_bold=False):
     return ''.join(parts)
 
 
-def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
+def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment=''):
     """
     Generate Markdown text for Neurocat. Returns (text, utm_links).
     Bold → **text**, italic → *text*, links → collected separately with UTM.
@@ -1773,7 +1902,10 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
         # Normalize spaces inside { first_name } before stripping
         inner = re.sub(r'\{\s*first_name\s*\}', '{first_name}', inner)
         if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
-            # Handle {first_name} glued to bold marker (e.g. **{first_name}, text → **text)
+            # ", **{first_name}**" — variable is bold, comma is outside the bold markers
+            # e.g. "Привет, **{first_name}**. Я Павел" → "Привет. Я Павел"
+            inner = re.sub(r'\s*,\s*\*\*\{first_name\}\*\*', '', inner)
+            # "**{first_name}[punct] " — variable at start of bold block
             inner = re.sub(r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*', '**', inner)
             inner = _strip_first_name(inner)
             inner = re.sub(r'\*{4,}', '', inner).strip()  # clean up empty **..** remnants
@@ -1782,6 +1914,15 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
 
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'**{inner}**'
+
+        # When a paragraph starts with emoji then **, move the emoji inside the bold markers
+        # so ** is at position 0. Neurocat renders **🔥 text** correctly but not 🔥 **text**.
+        if _EMOJI_BEFORE_DSTAR_RE.search(inner):
+            inner = re.sub(
+                r'^([☀-➿\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF\U00002702-\U000027B0]+\s*)\*\*',
+                r'**\1',
+                inner
+            )
 
         result_parts.append(inner)
 
@@ -1793,6 +1934,7 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
         cleaned = []
         for para in paragraphs:
             para = re.sub(r'\{\s*first_name\s*\}', '{first_name}', para)
+            para = re.sub(r'\s*,\s*\*\*\{first_name\}\*\*', '', para)
             para = re.sub(r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*', '**', para)
             para = _strip_first_name(para).strip()
             para = re.sub(r'\*{4,}', '', para).strip()
@@ -1807,11 +1949,11 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date):
     for url in raw_links:
         if url not in seen:
             seen.add(url)
-            utm_links.append(build_utm_url(url, channel_key, campaign, date))
+            utm_links.append(build_utm_url(url, channel_key, campaign, date, segment))
 
     return text, utm_links
 
-def generate_tg_html(tg_section_html, channel_key, campaign, date):
+def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
     """
     Generate <p><b>...</b></p> style HTML for GC mailings / Max.
     """
@@ -1821,34 +1963,36 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date):
     result_parts = []
     for tag in body.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol']):
         if tag.name in ('ul', 'ol'):
+            # Group list items together — no spacer between bullets
+            items = []
             for li in tag.find_all('li'):
                 inner = clean_tag_for_tg(li).strip()
                 if inner:
-                    result_parts.append(f'<p>• {inner}</p>')
-            result_parts.append('<p>&nbsp;</p>')
+                    items.append(f'<p>• {inner}</p>')
+            if items:
+                result_parts.append('\n'.join(items))
             continue
 
         raw_text = tag.get_text(strip=True)
-        # Skip РЕКЛАМА notice that may already be in the source doc
         if _REKLAMA_RE.search(raw_text) or 'ИНН 9715401631' in raw_text:
             continue
-        # Skip footnote anchor paragraphs ([a], [b], etc.)
         if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
             continue
 
         inner = clean_tag_for_tg(tag).strip()
         if not inner:
-            result_parts.append('<p>&nbsp;</p>')
-            continue
+            continue  # empty paragraphs skipped — spacers added uniformly below
 
-        # Wrap headings in bold
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
 
         result_parts.append(f'<p>{inner}</p>')
 
-    output = '\n'.join(result_parts)
-    output = inject_utm_in_html(output, channel_key, campaign, date)
+    # Always insert a blank-line spacer between every content block for TG readability.
+    # (Empty paragraphs from Google Docs are filtered in tags_to_html, so we can't rely
+    # on them being present — instead we add spacers unconditionally here.)
+    output = '\n<p>&nbsp;</p>\n'.join(result_parts)
+    output = inject_utm_in_html(output, channel_key, campaign, date, segment=segment)
     # Normalize GC variables split across bold/italic spans: {<b>first_name</b>} → {first_name}
     output = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', output)
     if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
@@ -1860,7 +2004,7 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date):
     output += '\n<p>&nbsp;</p>\n<p>РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>\n<p>ИНН 9715401631</p>'
     return output
 
-def generate_tg_bots(tg_section_html, channel_key, campaign, date):
+def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
     """
     Generate simplified text (no <p> wrappers) for TG Bots channel.
     Supports <b>, <i>, <a href>.
@@ -1896,7 +2040,7 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date):
         result_parts.append(inner)
 
     output = '\n\n'.join(result_parts)
-    output = inject_utm_in_html(output, channel_key, campaign, date)
+    output = inject_utm_in_html(output, channel_key, campaign, date, segment=segment)
     # Normalize GC variables split across bold/italic spans: {<b>first_name</b>} → {first_name}
     output = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', output)
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
@@ -2082,6 +2226,8 @@ def api_parse():
         'preview': parsed['preview'],
         'links': parsed['links'][:50],
         'footnotes': parsed['footnotes'],
+        'doc_campaign': parsed.get('doc_campaign', ''),
+        'doc_date': parsed.get('doc_date', ''),
     }
     if ai_error:
         response_data['ai_warning'] = f'AI парсинг недоступен: {ai_error}'
@@ -2097,6 +2243,7 @@ def api_generate():
     channels = data.get('channels', list(CHANNELS.keys()))
     campaign = data.get('campaign', '')
     date = data.get('date', '')
+    segment = data.get('segment', '')
     images = data.get('images', [])
     subject = content.get('subject', '')
 
@@ -2145,7 +2292,7 @@ def api_generate():
             if html_to_use:
                 try:
                     html, blocks = generate_email_html(
-                        html_to_use, ch_key, campaign, date, images, subject
+                        html_to_use, ch_key, campaign, date, images, subject, segment
                     )
                     result[ch_key] = html
                     result[f'{ch_key}_blocks'] = blocks
@@ -2156,7 +2303,7 @@ def api_generate():
             src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html, email_variants)
             if src:
                 try:
-                    result[ch_key] = generate_tg_html(src, ch_key, campaign, date)
+                    result[ch_key] = generate_tg_html(src, ch_key, campaign, date, segment)
                 except Exception as e:
                     result[ch_key] = f'<!-- Error: {e} -->'
 
@@ -2164,7 +2311,7 @@ def api_generate():
             src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html, email_variants)
             if src:
                 try:
-                    result[ch_key] = generate_tg_bots(src, ch_key, campaign, date)
+                    result[ch_key] = generate_tg_bots(src, ch_key, campaign, date, segment)
                 except Exception as e:
                     result[ch_key] = f'Error: {e}'
 
@@ -2172,7 +2319,7 @@ def api_generate():
             src = _pick_tg_src(ch_info, tg_variants_content, tg_section_html, email_section_html, email_variants)
             if src:
                 try:
-                    text, links = generate_tg_markdown(src, ch_key, campaign, date)
+                    text, links = generate_tg_markdown(src, ch_key, campaign, date, segment)
                     result[ch_key] = text
                     result[f'{ch_key}_links'] = links
                 except Exception as e:
@@ -2258,13 +2405,14 @@ def api_generate_utm():
     base_url = data.get('url', '').strip()
     campaign = data.get('campaign', '')
     date = data.get('date', '')
+    segment = data.get('segment', '')
 
     if not base_url:
         return jsonify({'error': 'URL не указан'}), 400
 
     result = {}
     for ch_key, ch_info in CHANNELS.items():
-        utm_url = build_utm_url(base_url, ch_key, campaign, date)
+        utm_url = build_utm_url(base_url, ch_key, campaign, date, segment)
         result[ch_key] = {
             'name': ch_info['name'],
             'url': utm_url,
