@@ -269,11 +269,19 @@ function createEmailPanelEl(key, html, blocks) {
   div.className = 'tab-content';
   div.id = `panel-${key}`;
 
+  const showGcBtn = (key === 'email');
   div.innerHTML = `
     <div class="tab-toolbar">
       <div class="toolbar-spacer"></div>
       <button class="toolbar-btn" id="copybtn-${key}" onclick="copyChannelHtml('${key}')">📋 Скопировать HTML</button>
+      ${showGcBtn ? `<button class="toolbar-btn gc-push-btn" onclick="pushToMail('${key}')">🚀 В GetCourse</button>` : ''}
     </div>
+    ${showGcBtn ? `<div class="gc-push-form" id="gcmailform-${key}" style="display:none">
+      <input type="text" id="gcmailname-${key}" placeholder="Название рассылки в GetCourse">
+      <button class="toolbar-btn primary-btn" onclick="confirmPushToMail('${key}')">Отправить</button>
+      <button class="toolbar-btn" onclick="closeMailForm('${key}')">Отмена</button>
+      <span class="gc-push-status" id="gcmailstatus-${key}"></span>
+    </div>` : ''}
     <div class="email-editor-layout">
       <div class="email-preview-col">
         <div class="preview-col-label">Предпросмотр</div>
@@ -321,11 +329,19 @@ function createTgHtmlPanelEl(key, content) {
   div.className = 'tab-content';
   div.id = `panel-${key}`;
 
+  const showGcBtnTg = GC_PUSH_TG_CHANNELS.includes(key);
   div.innerHTML = `
     <div class="tab-toolbar">
       <div class="toolbar-spacer"></div>
       <button class="toolbar-btn" onclick="copyChannelHtml('${key}')">📋 Скопировать</button>
+      ${showGcBtnTg ? `<button class="toolbar-btn gc-push-btn" onclick="pushToMail('${key}')">🚀 В GetCourse</button>` : ''}
     </div>
+    ${showGcBtnTg ? `<div class="gc-push-form" id="gcmailform-${key}" style="display:none">
+      <input type="text" id="gcmailname-${key}" placeholder="Название рассылки в GetCourse">
+      <button class="toolbar-btn primary-btn" onclick="confirmPushToMail('${key}')">Отправить</button>
+      <button class="toolbar-btn" onclick="closeMailForm('${key}')">Отмена</button>
+      <span class="gc-push-status" id="gcmailstatus-${key}"></span>
+    </div>` : ''}
     <div class="code-preview-split">
       <textarea id="code-${key}" class="code-editor" placeholder="HTML для Telegram..."></textarea>
       <div class="preview-pane tg-preview-pane">
@@ -1131,6 +1147,57 @@ async function confirmPushToGC(channelKey) {
     if (data.ok) {
       statusEl.textContent = `✓ Добавлено! В очереди: ${data.total}`;
       document.getElementById(`gcform-${channelKey}`).style.display = 'none';
+    } else {
+      statusEl.textContent = '⚠ ' + (data.error || 'Ошибка');
+    }
+  } catch (e) {
+    statusEl.textContent = '⚠ ' + e.message;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Push to mail.zerocoder.info → GC drafts
+// ---------------------------------------------------------------------------
+
+function pushToMail(channelKey) {
+  if (!_gcContent(channelKey)) { showError('Сначала сгенерируйте содержимое'); return; }
+  const nameInput = document.getElementById(`gcmailname-${channelKey}`);
+  nameInput.value = document.getElementById('subjectField')?.value || CHANNEL_NAMES[channelKey] || channelKey;
+  document.getElementById(`gcmailstatus-${channelKey}`).textContent = '';
+  document.getElementById(`gcmailform-${channelKey}`).style.display = 'flex';
+  nameInput.focus();
+  nameInput.select();
+}
+
+function closeMailForm(channelKey) {
+  const form = document.getElementById(`gcmailform-${channelKey}`);
+  if (form) form.style.display = 'none';
+}
+
+async function confirmPushToMail(channelKey) {
+  const name = document.getElementById(`gcmailname-${channelKey}`)?.value.trim();
+  const subject = document.getElementById('subjectField')?.value || '';
+  const content = _gcContent(channelKey);
+  const statusEl = document.getElementById(`gcmailstatus-${channelKey}`);
+  const date = document.getElementById('utmDate')?.value.trim() || '';
+
+  if (!name) { statusEl.textContent = 'Введите название'; return; }
+  if (!content) { statusEl.textContent = 'Нет содержимого'; return; }
+
+  statusEl.textContent = '⏳ Отправляю...';
+  try {
+    const resp = await fetch('/api/push-to-mail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, subject, html: content, channel_key: channelKey,
+        date_tag: date ? `web-${date}` : '',
+      }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      statusEl.textContent = `✓ Создано! job: ${data.job_id}`;
+      setTimeout(() => closeMailForm(channelKey), 4000);
     } else {
       statusEl.textContent = '⚠ ' + (data.error || 'Ошибка');
     }

@@ -2466,5 +2466,51 @@ def api_push_to_gc():
     return jsonify({'ok': True, 'total': len(updated)})
 
 
+@app.route('/api/push-to-mail', methods=['POST'])
+def api_push_to_mail():
+    data = request.get_json(force=True)
+    name = data.get('name', '').strip()
+    subject = data.get('subject', '').strip()
+    html = data.get('html', '').strip()
+    channel_key = data.get('channel_key', 'email')
+    date_tag = data.get('date_tag', '')
+
+    if not name or not html:
+        return jsonify({'error': 'Нужны name и html'}), 400
+
+    mail_url = os.getenv('MAIL_API_URL', 'https://mail.zerocoder.info')
+    mail_token = os.getenv('MAIL_API_TOKEN', '')
+    if not mail_token:
+        return jsonify({'error': 'MAIL_API_TOKEN не настроен в .env'}), 500
+
+    transport = _GC_TRANSPORT.get(channel_key, 'email')
+    headers = {'Authorization': f'Bearer {mail_token}', 'Content-Type': 'application/json'}
+    payload = {
+        'category': '0',
+        'tags': [date_tag] if date_tag else [],
+        'mailings': [{
+            'name': name,
+            'subject': subject,
+            'html': html,
+            'transport': transport,
+            'tags': ['announce'],
+        }],
+    }
+
+    try:
+        resp = requests.post(f'{mail_url}/api/mailings', json=payload, headers=headers, timeout=30)
+        if resp.status_code == 401:
+            return jsonify({'error': 'Неверный токен авторизации'}), 401
+        if resp.status_code == 400:
+            return jsonify({'error': 'Некорректный запрос: ' + resp.text}), 400
+        if resp.status_code == 422:
+            return jsonify({'error': 'Ошибка формата: ' + resp.text}), 422
+        resp.raise_for_status()
+        result = resp.json()
+        return jsonify({'ok': True, 'job_id': result.get('job_id'), 'count': result.get('count', 1)})
+    except requests.RequestException as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
