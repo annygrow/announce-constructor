@@ -80,7 +80,8 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 
 **ПРЕХЕДЕР / ПРЕВЬЮ** (поле "preview"):
 Заголовок содержит: "превью:", "прехедер:", "preview:", "preheader:"
-Значение — текст после двоеточия. Без самой метки.
+Значение — ТОЛЬКО текст после двоеточия на той же строке. Без самой метки.
+ВАЖНО: прехедер — это короткая фраза (обычно до 150 символов). Это НЕ абзацы письма. Если после метки идёт только одна короткая строка — бери только её, не захватывай следующий абзац.
 
 **СЕКЦИИ, КОТОРЫЕ НУЖНО ПРОПУСКАТЬ (не включать в контент)**:
 - строки-заголовки секций (сами метки, не контент)
@@ -2277,7 +2278,12 @@ def api_parse():
     # and free-form text); keyword parser is fallback when AI found nothing.
     if ai_result:
         parsed['subject'] = ai_result.get('subject') or parsed['subject']
-        parsed['preview'] = ai_result.get('preview') or parsed['preview']
+        ai_preview = ai_result.get('preview') or ''
+        # If AI preview is suspiciously long (>250 chars), it likely grabbed body text — use keyword result
+        if ai_preview and len(ai_preview) <= 250:
+            parsed['preview'] = ai_preview
+        elif not parsed['preview']:
+            parsed['preview'] = ai_preview
 
         # If AI identified a preview, strip the preheader marker line from email HTML
         # so it doesn't appear in the email body.
