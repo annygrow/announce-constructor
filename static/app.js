@@ -839,14 +839,17 @@ function paragraphsHtmlToText(html) {
       const style = p.getAttribute('style') || '';
       const txt = p.textContent.trim();
       if (style.includes('font-size:6px') || style.includes('font-size:4px')) return false;
-      if (!txt || txt === ' ') return false;
       return true;
     })
     .map(p => {
       const style = p.getAttribute('style') || '';
+      const txt = p.textContent.trim();
+      if (style.includes('font-size:8px') && (!txt || txt === ' ')) return '';
+      if (!txt || txt === ' ') return null;
       const inner = extractCleanInlineHtml(p);
       return style.includes('text-align:center') ? `<center>${inner}</center>` : inner;
     })
+    .filter(l => l !== null)
     .join('\n');
 }
 
@@ -1012,9 +1015,10 @@ function toggleNewBlockFields(channelKey) {
 function makeParaHtml(text, color) {
   const linkColor = color === '#ffffff' ? '#e1fb52' : '#1445ea';
   const pBase = `margin:0 0 10px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:27px;color:${color};font-size:18px`;
+  const spacer = `<p style="margin:0;font-size:8px;line-height:16px">&nbsp;</p>`;
   return text.split('\n')
-    .filter(l => l.trim())
     .map(l => {
+      if (!l.trim()) return spacer;
       const t = l.trim();
       const isCenter = t.startsWith('<center>') && t.endsWith('</center>');
       const content = isCenter ? t.slice(8, -9) : t;

@@ -1276,11 +1276,13 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
     for tag in tags:
         tag_text = tag.get_text(strip=True)
 
-        # Case 0: "Кнопка: ТЕКСТ (ссылка)" — explicit button prefix format
+        # Case 0: "Кнопка: TEXT" — handles one or multiple buttons in same tag (via <br>)
         if re.match(r'^кнопка:\s*', tag_text, re.IGNORECASE):
-            btn_label = re.sub(r'^кнопка:\s*', '', tag_text, flags=re.IGNORECASE).strip()
-            a = tag.find('a', href=True)
-            items.append({'kind': 'btn', 'text': btn_label, 'url': a.get('href', '#') if a else '#'})
+            labels = [s.strip() for s in re.split(r'(?i)\s*кнопка:\s*', tag_text) if s.strip()]
+            links = tag.find_all('a', href=True)
+            for i, lbl in enumerate(labels):
+                a = links[i] if i < len(links) else None
+                items.append({'kind': 'btn', 'text': lbl, 'url': a.get('href', '#') if a else '#'})
             continue
 
         # Case 1: the whole tag is [BUTTON TEXT] or EMOJI [BUTTON TEXT]
@@ -1403,12 +1405,17 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
         first_btn = next((i for i in items if i['kind'] == 'btn'), None)
         btn_text_meta = first_btn['text'] if first_btn else ''
         btn_url_meta = build_utm_url(first_btn['url'], channel_key, campaign, date, segment) if first_btn else '#'
+        all_btns_meta = [
+            {'text': i['text'], 'url': build_utm_url(i['url'], channel_key, campaign, date, segment)}
+            for i in items if i['kind'] == 'btn'
+        ]
 
         meta = {
             'type': 'block_blue_cta',
             'paragraphs_html': paragraphs_html,
             'btn_text': btn_text_meta,
             'btn_url_utm': btn_url_meta,
+            'buttons': all_btns_meta,
             'preview_text': preview_text,
         }
         return html, meta
@@ -1474,6 +1481,18 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment='')
                 btn_url = build_utm_url(raw_url, channel_key, campaign, date, segment)
                 buttons.append((btn_text, btn_url))
                 continue
+        # Detect "Кнопка: TEXT" prefix format (possibly multiple via <br> in one tag)
+        if re.match(r'^кнопка:\s*', text, re.IGNORECASE):
+            labels = [s.strip() for s in re.split(r'(?i)\s*кнопка:\s*', text) if s.strip()]
+            links = tag.find_all('a', href=True)
+            for i, lbl in enumerate(labels):
+                a = links[i] if i < len(links) else None
+                if not a:
+                    continue
+                raw_url = decode_google_redirect(a.get('href', '#'))
+                btn_url = build_utm_url(raw_url, channel_key, campaign, date, segment)
+                buttons.append((lbl, btn_url))
+            continue
         if tag.name in ('ul', 'ol'):
             for li in tag.find_all('li'):
                 inner = elem_inner_html_for_email(li)
@@ -1629,6 +1648,21 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             # Treat standalone footnote references [a], [b], [d], [1] as block separators
             if raw_txt and _FOOTNOTE_REF_RE.match(raw_txt):
                 flush_pending()
+                return
+            # "Кнопка: TEXT" — each becomes its own separate button block
+            if raw_txt and re.match(r'^кнопка:\s*', raw_txt, re.IGNORECASE):
+                flush_pending()
+                labels = [s.strip() for s in re.split(r'(?i)\s*кнопка:\s*', raw_txt) if s.strip()]
+                links = el.find_all('a', href=True)
+                for i, lbl in enumerate(labels):
+                    a = links[i] if i < len(links) else None
+                    raw_href = decode_google_redirect(a.get('href', '#')) if a else '#'
+                    btn_url = build_utm_url(raw_href, channel_key, campaign, date, segment)
+                    raw_blocks.append((
+                        block_button(btn_url, lbl),
+                        {'type': 'block_button', 'paragraphs_html': '',
+                         'btn_text': lbl, 'btn_url_utm': btn_url, 'preview_text': lbl[:50]}
+                    ))
                 return
             if raw_txt:
                 pending_tags.append(el)
@@ -1903,7 +1937,21 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
         if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
             continue
 
+        # "Кнопка:" — each link as its own paragraph, no bold markers
+        if re.match(r'^кнопка:\s*', raw_text, re.IGNORECASE):
+            for a in tag.find_all('a', href=True):
+                href = decode_google_redirect(a['href'])
+                if not href.startswith('#'):
+                    raw_links.append(href)
+                link_text = a.get_text(strip=True)
+                if link_text:
+                    result_parts.append(link_text)
+            continue
+
         inner = _postprocess_md(clean_tag_for_tg_markdown(tag, raw_links).strip())
+        if not inner:
+            continue
+        inner = re.sub(r'\*{0,2}\s*ссылка:\s*\*{0,2}\s*', '', inner, flags=re.IGNORECASE).strip()
         if not inner:
             continue
 
@@ -1987,9 +2035,21 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
             continue
 
+        # "Кнопка:" — each link becomes its own separate paragraph
+        if re.match(r'^кнопка:\s*', raw_text, re.IGNORECASE):
+            for a in tag.find_all('a', href=True):
+                href = decode_google_redirect(a['href'])
+                link_inner = clean_tag_for_tg(a).strip()
+                if link_inner and not href.startswith('#'):
+                    result_parts.append(f'<p><a href="{href}">{link_inner}</a></p>')
+            continue
+
         inner = clean_tag_for_tg(tag).strip()
         if not inner:
             continue  # empty paragraphs skipped — spacers added uniformly below
+        inner = re.sub(r'(?:<[^>]+>)*\s*ссылка:\s*(?:<\/[^>]+>)*\s*', '', inner, flags=re.IGNORECASE).strip()
+        if not inner:
+            continue
 
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
@@ -2038,7 +2098,19 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
         if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
             continue
 
+        # "Кнопка:" — each link becomes its own separate entry
+        if re.match(r'^кнопка:\s*', raw_text, re.IGNORECASE):
+            for a in tag.find_all('a', href=True):
+                href = decode_google_redirect(a['href'])
+                link_inner = clean_tag_for_tg(a).strip()
+                if link_inner and not href.startswith('#'):
+                    result_parts.append(f'<a href="{href}">{link_inner}</a>')
+            continue
+
         inner = clean_tag_for_tg(tag).strip()
+        if not inner:
+            continue
+        inner = re.sub(r'(?:<[^>]+>)*\s*ссылка:\s*(?:<\/[^>]+>)*\s*', '', inner, flags=re.IGNORECASE).strip()
         if not inner:
             continue
 
@@ -2153,13 +2225,34 @@ def api_parse():
     except Exception as e:
         ai_error = str(e)
 
-    # Merge AI results into parsed: AI wins for subject/preview if keyword parser missed them,
-    # and provides separate channel variants that keyword parser may not have detected.
+    # Merge AI results into parsed: AI is primary for subject/preview (smarter about typos
+    # and free-form text); keyword parser is fallback when AI found nothing.
     if ai_result:
-        if not parsed['subject'] and ai_result.get('subject'):
-            parsed['subject'] = ai_result['subject']
-        if not parsed['preview'] and ai_result.get('preview'):
-            parsed['preview'] = ai_result['preview']
+        parsed['subject'] = ai_result.get('subject') or parsed['subject']
+        parsed['preview'] = ai_result.get('preview') or parsed['preview']
+
+        # If AI identified a preview, strip the preheader marker line from email HTML
+        # so it doesn't appear in the email body.
+        if parsed['preview']:
+            _preview_marker_re = re.compile(
+                r'(прехедер|прехендер|прехэдер|превью|preview|preheader)\s*:',
+                re.IGNORECASE
+            )
+
+            def _strip_preview_line(html):
+                if not html:
+                    return html
+                soup = BeautifulSoup(html, 'html.parser')
+                for tag in soup.find_all(True):
+                    if tag.name in ('p', 'div', 'span', 'h1', 'h2', 'h3', 'h4'):
+                        if _preview_marker_re.search(tag.get_text(strip=True)) and len(tag.get_text(strip=True)) < 250:
+                            tag.decompose()
+                return str(soup)
+
+            parsed['email_html'] = _strip_preview_line(parsed['email_html'])
+            if parsed.get('email_variants'):
+                for v in parsed['email_variants']:
+                    v['html'] = _strip_preview_line(v['html'])
 
         if not parsed['email_html'] and ai_result.get('email_gc'):
             parsed['email_html'] = ai_result['email_gc']
@@ -2351,19 +2444,35 @@ def api_assemble_email():
         btn_url_utm = block.get('btn_url_utm', '#')
 
         if btype == 'block_blue_cta':
+            buttons = block.get('buttons') or [{'text': btn_text, 'url': btn_url_utm}]
+            BTN_A = ("background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
+                     "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+                     "font-size:16px;display:inline-block;font-weight:600")
+            btn_rows = ''.join(
+                f'<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
+                f'<a href="{b["url"]}" target="_blank" style="{BTN_A}">{b["text"]}</a>\n'
+                f'</td></tr>\n'
+                for b in buttons
+            )
             if ph.strip():
-                row = block_blue_cta(ph, btn_url_utm, btn_text)
-            else:
-                btn_style = (
-                    "background:#1445ea;color:#ffffff;padding:12px 28px;border-radius:30px;"
-                    "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
-                    "font-size:16px;display:inline-block;font-weight:600"
-                )
                 row = (
-                    '<tr><td align="center" bgcolor="#ffffff" '
-                    'style="padding:12px 20px;background-color:#ffffff">\n'
-                    f'<a href="{btn_url_utm}" target="_blank" style="{btn_style}">{btn_text}</a>\n'
-                    '</td></tr>'
+                    '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+                    '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
+                    'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
+                    '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px 5px;margin:0;'
+                    'font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;'
+                    'line-height:27px;color:#ffffff">\n'
+                    + ph + '\n</td></tr>\n'
+                    + btn_rows
+                    + '</table></td></tr>'
+                )
+            else:
+                row = (
+                    '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+                    '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
+                    'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
+                    + btn_rows
+                    + '</table></td></tr>'
                 )
         elif btype == 'block_grey':
             row = block_grey(ph)
