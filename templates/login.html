@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Вход — Конструктор рассылок</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon (2).svg">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --purple:       #7c3aed;
+      --purple-hover: #6d28d9;
+      --bg:           #0e0e17;
+      --surface:      #17172a;
+      --surface-2:    #1f1f35;
+      --border:       #2a2a42;
+      --text:         #e2e8f0;
+      --text-muted:   #8892a8;
+      --danger:       #f87171;
+      --radius:       10px;
+      --font:         'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: var(--font);
+      font-size: 14px;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background-image:
+        radial-gradient(ellipse 60% 40% at 50% 0%, rgba(124,58,237,.12) 0%, transparent 70%);
+    }
+
+    .login-wrap {
+      width: 100%;
+      max-width: 380px;
+      padding: 24px 16px;
+    }
+
+    /* Logo block */
+    .login-logo {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .login-logo img.cat {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+    }
+
+    .login-logo .title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -.2px;
+    }
+
+    .login-logo .brand {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .login-logo .brand img {
+      height: 16px;
+      opacity: .7;
+    }
+
+    /* Card */
+    .login-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 28px 24px;
+      box-shadow: 0 4px 32px rgba(0,0,0,.5), 0 1px 4px rgba(0,0,0,.4);
+    }
+
+    .login-card h2 {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 20px;
+    }
+
+    .field {
+      margin-bottom: 14px;
+    }
+
+    .field label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      letter-spacing: .3px;
+      text-transform: uppercase;
+    }
+
+    .field input {
+      width: 100%;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+
+    .field input:focus {
+      border-color: var(--purple);
+      box-shadow: 0 0 0 3px rgba(124,58,237,.18);
+    }
+
+    .field input::placeholder {
+      color: var(--text-muted);
+      opacity: .6;
+    }
+
+    .error-msg {
+      background: rgba(248,113,113,.1);
+      border: 1px solid rgba(248,113,113,.3);
+      border-radius: var(--radius);
+      color: var(--danger);
+      font-size: 13px;
+      padding: 9px 12px;
+      margin-bottom: 14px;
+    }
+
+    .btn-login {
+      width: 100%;
+      background: var(--purple);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-family: var(--font);
+      font-size: 14px;
+      font-weight: 600;
+      padding: 11px;
+      cursor: pointer;
+      margin-top: 6px;
+      transition: background .15s, transform .1s;
+    }
+
+    .btn-login:hover  { background: var(--purple-hover); }
+    .btn-login:active { transform: scale(.98); }
+  </style>
+</head>
+<body>
+
+<div class="login-wrap">
+
+  <div class="login-logo">
+    <img class="cat" src="/static/cat_icon.png" alt="">
+    <div class="title">Конструктор рассылок</div>
+    <div class="brand">
+      <img src="/static/logo.png" alt="Зерокодер">
+      <span>Зерокодер</span>
+    </div>
+  </div>
+
+  <div class="login-card">
+    <h2>Вход в систему</h2>
+
+    {% if error %}
+    <div class="error-msg">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" action="/login">
+      <div class="field">
+        <label>Логин</label>
+        <input type="text" name="username" placeholder="Введите логин" autocomplete="username" autofocus>
+      </div>
+      <div class="field">
+        <label>Пароль</label>
+        <input type="password" name="password" placeholder="Введите пароль" autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn-login">Войти</button>
+    </form>
+  </div>
+
+</div>
+
+</body>
+</html>

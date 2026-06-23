@@ -3,7 +3,7 @@ import os
 import json
 import logging
 import requests
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from bs4 import BeautifulSoup, NavigableString, Tag
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote, quote
 from dotenv import load_dotenv
@@ -21,6 +21,34 @@ logging.basicConfig(
 
 app = Flask(__name__)
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.secret_key = os.environ.get('SECRET_KEY', 'change-me-please')
+
+APP_USERNAME = os.environ.get('APP_USERNAME', '')
+APP_PASSWORD = os.environ.get('APP_PASSWORD', '')
+
+@app.before_request
+def require_login():
+    if request.path.startswith('/static/') or request.path in ('/login', '/favicon.ico'):
+        return None
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+        if username == APP_USERNAME and password == APP_PASSWORD:
+            session['logged_in'] = True
+            return redirect(url_for('index'))
+        error = 'Неверный логин или пароль'
+    return render_template('login.html', error=error)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 @app.after_request
 def no_cache_static(response):
