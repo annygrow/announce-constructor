@@ -2731,10 +2731,10 @@ def api_push_to_mail():
         'subject': subject,
         'html': html,
         'tags': mailing_tags,
-        'transport': transport,
     }
     payload = {
         'category': '0',
+        'transport': transport,
         'tags': [date_tag] if date_tag else [],
         'mailings': [mailing],
     }
