@@ -2660,7 +2660,7 @@ GC_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gc_out
 _GC_TRANSPORT = {
     'email':           'email',
     'email_unisender': 'email',
-    'tg_gc':           'telegram',
+    'tg_gc':           'tg',
     'max':             'max',
 }
 
