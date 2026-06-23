@@ -567,10 +567,11 @@ def is_section_header(tag):
     tg_kw = ['телеграм/max', 'телеграм/макс', 'telegram/max', 'telegram/макс', 'тг/max', 'тг/макс', 'тг+max',
              'телеграм бот', 'тг бот', 'telegram бот', 'текст для тг', 'для телеграм', 'для тг',
              'телеграм (', 'тг (', 'telegram (', 'тг:', 'тг+мax',
-             'телеграм воронки', 'тг воронки', 'telegram воронки', 'для воронки']
+             'телеграм воронки', 'тг воронки', 'telegram воронки', 'для воронки',
+             'бота тг', 'бота telegram', 'сообщение для тг', 'сообщение для бота']
     tg_only_kw = ['телеграм:', 'telegram:']
     subject_kw = ['тема письма', 'тема:', 'темы:', 'subject:']
-    preview_kw = ['превью:', 'прехедер:', 'preview:', 'preheader:']
+    preview_kw = ['превью:', 'прехедер:', 'прехендер:', 'preview:', 'preheader:', 'preheader :', 'прехэдер:']
     meta_kw = ['кампания:', 'каналы ', 'каналы(', 'сегмент ', 'сегмент(',
                'исключаем', 'включаем', 'от кого:', 'from:']
 
@@ -1274,6 +1275,13 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
 
     for tag in tags:
         tag_text = tag.get_text(strip=True)
+
+        # Case 0: "Кнопка: ТЕКСТ (ссылка)" — explicit button prefix format
+        if re.match(r'^кнопка:\s*', tag_text, re.IGNORECASE):
+            btn_label = re.sub(r'^кнопка:\s*', '', tag_text, flags=re.IGNORECASE).strip()
+            a = tag.find('a', href=True)
+            items.append({'kind': 'btn', 'text': btn_label, 'url': a.get('href', '#') if a else '#'})
+            continue
 
         # Case 1: the whole tag is [BUTTON TEXT] or EMOJI [BUTTON TEXT]
         m = _BTN_BRACKET_RE.match(tag_text)
