@@ -2340,10 +2340,8 @@ def api_parse():
     if ai_result:
         parsed['subject'] = ai_result.get('subject') or parsed['subject']
         ai_preview = ai_result.get('preview') or ''
-        # If AI preview is suspiciously long (>250 chars), it likely grabbed body text — use keyword result
-        if ai_preview and len(ai_preview) <= 250:
-            parsed['preview'] = ai_preview
-        elif not parsed['preview']:
+        # AI may only correct/clean a preview already found by keyword parser — never invent one
+        if ai_preview and len(ai_preview) <= 250 and parsed['preview']:
             parsed['preview'] = ai_preview
 
         # If AI identified a preview, strip the preheader marker line from email HTML
@@ -2772,7 +2770,7 @@ def api_job_status(job_id):
         if results:
             mailing_id = results[0].get('id') or results[0].get('mailing_id')
             if mailing_id:
-                gc_url = f'https://{gc_domain}/pl/letters/{mailing_id}/edit'
+                gc_url = f'https://{gc_domain}/notifications/control/mailings/update/id/{mailing_id}'
         return jsonify({
             'status': job_data.get('status'),
             'gc_url': gc_url,
