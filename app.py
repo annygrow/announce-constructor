@@ -716,6 +716,15 @@ def extract_footnotes(soup):
                 url = decode_google_redirect(a['href'])
                 footnotes.append({'label': label, 'url': url, 'text': text.strip()})
 
+    # Remove footnote/comment containers from the soup so they don't leak into content.
+    # These are divs that contain <a id="cmntN"> or <a id="ftnN"> anchors.
+    removed = set()
+    for a_tag in soup.find_all('a', id=re.compile(r'^(cmnt|ftn)\d')):
+        container = a_tag.find_parent('div')
+        if container and id(container) not in removed:
+            removed.add(id(container))
+            container.decompose()
+
     return footnotes, cmnt_url_map
 
 
@@ -2144,7 +2153,14 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
 
-        result_parts.append(f'<p>{inner}</p>')
+        # Split at soft returns (\n in text nodes) — Google Docs Shift+Enter puts multiple
+        # logical paragraphs into one <p>; each becomes a separate TG paragraph.
+        if '\n' in inner:
+            sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
+            for part in sub_parts:
+                result_parts.append(f'<p>{part}</p>')
+        else:
+            result_parts.append(f'<p>{inner}</p>')
 
     # Always insert a blank-line spacer between every content block for TG readability.
     # (Empty paragraphs from Google Docs are filtered in tags_to_html, so we can't rely
