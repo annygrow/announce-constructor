@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import requests
+from datetime import timedelta
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from bs4 import BeautifulSoup, NavigableString, Tag
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote, quote
@@ -22,6 +23,7 @@ logging.basicConfig(
 app = Flask(__name__)
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 app.secret_key = os.environ.get('SECRET_KEY', 'change-me-please')
+app.permanent_session_lifetime = timedelta(days=7)
 
 APP_USERNAME = os.environ.get('APP_USERNAME', '')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', '')
@@ -40,6 +42,7 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '').strip()
         if username == APP_USERNAME and password == APP_PASSWORD:
+            session.permanent = True
             session['logged_in'] = True
             return redirect(url_for('index'))
         error = 'Неверный логин или пароль'
