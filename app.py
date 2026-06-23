@@ -633,10 +633,21 @@ def is_section_header(tag):
     if any(text.startswith(kw) or text == kw.rstrip(':') for kw in meta_kw):
         return 'skip'
 
+    # Standalone email section headers — exact match
+    email_exact = {'почта', 'письмо', 'e-mail'}
+    if text in email_exact:
+        return 'email_section'
+
     # Standalone TG section headers — single-word only, exact match to avoid false positives
     tg_exact = {'телеграм', 'telegram', 'тг', 'tg', 'max', 'instagram', 'push', 'youtube',
                 'инстаграм', 'ютуб', 'нейрокот', 'помощник'}
     if text in tg_exact:
+        return 'tg_section'
+
+    # Handle merged paragraph: label + first content line in one <p> (e.g. "Телеграм\n30+ продуктов...")
+    # Google Docs sometimes puts the section label and first line in the same paragraph via <br> tags.
+    first_word = text.split()[0] if text.split() else ''
+    if first_word in {'телеграм', 'telegram'} and len(text) <= 120:
         return 'tg_section'
 
     # Skip standalone single-word channel-type labels that appear in config tables
