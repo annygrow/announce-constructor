@@ -858,6 +858,11 @@ def parse_doc_html(html_content):
     body = soup.find('body') or soup
     fix_orphan_sups(body)
 
+    # Extract Google Docs document title (strip " - Google Docs / Документы" suffix)
+    title_tag = soup.find('title')
+    doc_title = title_tag.get_text(strip=True) if title_tag else ''
+    doc_title = re.sub(r'\s*[-–]\s*Google\s+(?:Docs|Документы|Document[s]?)\s*$', '', doc_title, flags=re.IGNORECASE).strip()
+
     footnotes, cmnt_url_map = extract_footnotes(soup)
     all_links = extract_all_links(soup)
 
@@ -870,12 +875,22 @@ def parse_doc_html(html_content):
     current_section = 'other'
     subject = ''
     preview = ''
+    sender = ''
 
     def process_block(tag):
-        nonlocal current_section, subject, preview
+        nonlocal current_section, subject, preview, sender
         section_type = is_section_header(tag)
 
         if section_type == 'skip':
+            # Capture sender name from "от кого: ..." meta line before discarding
+            if not sender:
+                raw_text = get_text_content(tag).strip()
+                m = re.match(r'^от\s+кого\s*[:\s]\s*(.+)', raw_text, re.IGNORECASE)
+                if m:
+                    val = m.group(1).strip()
+                    if 'зерокодер' not in val.lower():
+                        val = val + ' из Зерокодера'
+                    sender = val
             return
 
         if section_type == 'email_section':
@@ -1115,6 +1130,8 @@ def parse_doc_html(html_content):
         'segment': segment,
         'doc_campaign': doc_campaign,
         'doc_date': doc_date,
+        'doc_title': doc_title,
+        'sender': sender,
     }
 
 # ---------------------------------------------------------------------------
@@ -2622,6 +2639,8 @@ def api_push_to_mail():
     html = data.get('html', '').strip()
     channel_key = data.get('channel_key', 'email')
     date_tag = data.get('date_tag', '')
+    preheader = data.get('preheader', '').strip()
+    sender_name = data.get('sender_name', '').strip() or 'Университет Зерокодер'
 
     if not name or not html:
         return jsonify({'error': 'Нужны name и html'}), 400
@@ -2633,16 +2652,20 @@ def api_push_to_mail():
 
     transport = _GC_TRANSPORT.get(channel_key, 'email')
     headers = {'Authorization': f'Bearer {mail_token}', 'Content-Type': 'application/json'}
+    mailing = {
+        'name': name,
+        'subject': subject,
+        'html': html,
+        'transport': transport,
+        'sender_name': sender_name,
+        'tags': ['announce'],
+    }
+    if preheader:
+        mailing['preheader'] = preheader
     payload = {
         'category': '0',
         'tags': [date_tag] if date_tag else [],
-        'mailings': [{
-            'name': name,
-            'subject': subject,
-            'html': html,
-            'transport': transport,
-            'tags': ['announce'],
-        }],
+        'mailings': [mailing],
     }
 
     try:

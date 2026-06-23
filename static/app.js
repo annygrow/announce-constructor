@@ -1163,10 +1163,25 @@ async function confirmPushToGC(channelKey) {
 // Push to mail.zerocoder.info → GC drafts
 // ---------------------------------------------------------------------------
 
+const _CH_TAG = { tg_gc: 'tg', max: 'max' };
+
+function buildMailingName(channelKey) {
+  const campaign = document.getElementById('utmCampaign')?.value.trim() || '';
+  const date     = document.getElementById('utmDate')?.value.trim() || '';
+  const title    = (parsedData.doc_title || '').trim();
+  const chTag    = _CH_TAG[channelKey];
+  let name = '[announce]';
+  if (chTag) name += `[${chTag}]`;
+  if (campaign) name += `[${campaign}]`;
+  if (date)     name += `[${date}]`;
+  if (title)    name += ` ${title}`;
+  return name.trim();
+}
+
 function pushToMail(channelKey) {
   if (!_gcContent(channelKey)) { showError('Сначала сгенерируйте содержимое'); return; }
   const nameInput = document.getElementById(`gcmailname-${channelKey}`);
-  nameInput.value = document.getElementById('subjectField')?.value || CHANNEL_NAMES[channelKey] || channelKey;
+  nameInput.value = buildMailingName(channelKey);
   document.getElementById(`gcmailstatus-${channelKey}`).textContent = '';
   document.getElementById(`gcmailform-${channelKey}`).style.display = 'flex';
   nameInput.focus();
@@ -1181,6 +1196,8 @@ function closeMailForm(channelKey) {
 async function confirmPushToMail(channelKey) {
   const name = document.getElementById(`gcmailname-${channelKey}`)?.value.trim();
   const subject = document.getElementById('subjectField')?.value || '';
+  const preheader = document.getElementById('previewField')?.value.trim() || '';
+  const senderName = (parsedData.sender || '').trim() || 'Университет Зерокодер';
   const content = _gcContent(channelKey);
   const statusEl = document.getElementById(`gcmailstatus-${channelKey}`);
   const date = document.getElementById('utmDate')?.value.trim() || '';
@@ -1196,6 +1213,7 @@ async function confirmPushToMail(channelKey) {
       body: JSON.stringify({
         name, subject, html: content, channel_key: channelKey,
         date_tag: date ? `web-${date}` : '',
+        preheader, sender_name: senderName,
       }),
     });
     const data = await resp.json();
