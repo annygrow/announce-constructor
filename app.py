@@ -543,6 +543,19 @@ def extract_doc_id(url):
         return m.group(1)
     return None
 
+def _title_from_content_disposition(cd_header):
+    """Extract document filename from Content-Disposition, strip extension."""
+    if not cd_header:
+        return ''
+    m = re.search(r"filename\*=UTF-8''([^\s;]+)", cd_header, re.IGNORECASE)
+    if m:
+        name = unquote(m.group(1))
+    else:
+        m = re.search(r'filename=["\']?([^"\';\r\n]+)["\']?', cd_header, re.IGNORECASE)
+        name = m.group(1).strip() if m else ''
+    return re.sub(r'\.(html?|docx?)$', '', name, flags=re.IGNORECASE).strip()
+
+
 def fetch_google_doc_html(doc_id):
     export_url = f'https://docs.google.com/document/d/{doc_id}/export?format=html'
     headers = {
@@ -554,7 +567,8 @@ def fetch_google_doc_html(doc_id):
     }
     resp = requests.get(export_url, headers=headers, allow_redirects=True, timeout=30)
     resp.raise_for_status()
-    return resp.text
+    title = _title_from_content_disposition(resp.headers.get('Content-Disposition', ''))
+    return resp.text, title
 
 def get_text_content(tag):
     """Get plain text from a BS4 tag, collapsing whitespace."""
@@ -2254,12 +2268,13 @@ def api_parse():
 
     try:
         if export_url:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get(export_url, headers=headers, allow_redirects=True, timeout=30)
+            req_headers = {'User-Agent': 'Mozilla/5.0'}
+            resp = requests.get(export_url, headers=req_headers, allow_redirects=True, timeout=30)
             resp.raise_for_status()
             html_content = resp.text
+            cd_title = _title_from_content_disposition(resp.headers.get('Content-Disposition', ''))
         else:
-            html_content = fetch_google_doc_html(doc_id)
+            html_content, cd_title = fetch_google_doc_html(doc_id)
     except requests.RequestException as e:
         return jsonify({'error': f'Ошибка загрузки документа: {str(e)}'}), 502
 
@@ -2267,6 +2282,9 @@ def api_parse():
         parsed = parse_doc_html(html_content)
     except Exception as e:
         return jsonify({'error': f'Ошибка разбора документа: {str(e)}'}), 500
+
+    if not parsed.get('doc_title') and cd_title:
+        parsed['doc_title'] = cd_title
 
     # Try AI-assisted parsing to enrich / fix sections
     ai_result = None
