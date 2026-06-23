@@ -927,8 +927,22 @@ def parse_doc_html(html_content):
             current_section = 'email_section'
             return
         if section_type == 'tg_section':
-            tg_subsections.append({'name': get_text_content(tag).strip(), 'blocks': []})
+            full_text = get_text_content(tag).strip()
+            tg_subsections.append({'name': full_text[:50], 'blocks': []})
             current_section = 'tg_section'
+            # If merged paragraph (label + content in same <p>), preserve content without label
+            first_word = full_text.split()[0].lower() if full_text.split() else ''
+            if full_text.lower() != first_word:
+                # Clone the tag, remove the first span that is just the section label
+                tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                if tag_copy:
+                    for span in list(tag_copy.find_all('span')):
+                        span_text = get_text_content(span).lower().strip()
+                        if span_text == first_word:
+                            span.decompose()
+                            break
+                    if get_text_content(tag_copy).strip():
+                        tg_subsections[-1]['blocks'].append(tag_copy)
             return
         if section_type == 'subject':
             # Extract text after the keyword from the tag itself
