@@ -2641,6 +2641,7 @@ def api_push_to_mail():
     date_tag = data.get('date_tag', '')
     preheader = data.get('preheader', '').strip()
     sender_name = data.get('sender_name', '').strip() or 'Университет Зерокодер'
+    campaign = data.get('campaign', '').strip()
 
     if not name or not html:
         return jsonify({'error': 'Нужны name и html'}), 400
@@ -2652,13 +2653,16 @@ def api_push_to_mail():
 
     transport = _GC_TRANSPORT.get(channel_key, 'email')
     headers = {'Authorization': f'Bearer {mail_token}', 'Content-Type': 'application/json'}
+    mailing_tags = ['announce']
+    if campaign:
+        mailing_tags.append(campaign)
     mailing = {
         'name': name,
         'subject': subject,
         'html': html,
         'transport': transport,
         'sender_name': sender_name,
-        'tags': ['announce'],
+        'tags': mailing_tags,
     }
     if preheader:
         mailing['preheader'] = preheader

@@ -1213,6 +1213,7 @@ async function confirmPushToMail(channelKey) {
       body: JSON.stringify({
         name, subject, html: content, channel_key: channelKey,
         date_tag: date ? `web-${date}` : '',
+        campaign: document.getElementById('utmCampaign')?.value.trim() || '',
         preheader, sender_name: senderName,
       }),
     });
