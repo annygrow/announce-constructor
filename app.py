@@ -2367,6 +2367,7 @@ def api_parse():
         f"email_variants={len(parsed.get('email_variants') or [])} "
         f"tg_html={bool(parsed['tg_html'])} "
         f"tg_variants={len(parsed.get('tg_variants') or [])} "
+        f"doc_title={parsed.get('doc_title', '')!r} "
         f"ai={'ok' if ai_result else ('err:'+ai_error[:60] if ai_error else 'skip')}"
     )
     logging.info(log_msg)
