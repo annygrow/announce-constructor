@@ -316,6 +316,7 @@ function createEmailPanelEl(key, html, blocks) {
     </div>`;
 
   const iframe = div.querySelector(`#preview-${key}`);
+  if (html) generatedOutputs[key] = html;
   setIframeSrc(iframe, html);
 
   emailBlocks[key] = blocks;
