@@ -2725,11 +2725,13 @@ def api_push_to_mail():
     mailing_tags = ['announce']
     if campaign:
         mailing_tags.append(campaign)
+    transport = _GC_TRANSPORT.get(channel_key, 'email')
     mailing = {
         'name': name,
         'subject': subject,
         'html': html,
         'tags': mailing_tags,
+        'transport': transport,
     }
     payload = {
         'category': '0',
