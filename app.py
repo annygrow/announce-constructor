@@ -1074,7 +1074,7 @@ def parse_doc_html(html_content):
     #   Format 2 (positional): list items = ["campaign-slug", "dd.mm", "HH:MM"]
     from datetime import datetime as _dt
     def _norm_date(raw):
-        raw = raw.strip()
+        raw = re.sub(r'\s*\.\s*', '.', raw.strip())
         dm = re.match(r'^(\d{1,2}\.\d{1,2})(?:\.(\d{2,4}))?', raw)
         if dm:
             y = dm.group(2) or f'{_dt.now().year % 100:02d}'
@@ -1093,6 +1093,8 @@ def parse_doc_html(html_content):
         if t.name in ('ul', 'ol'):
             for li in t.find_all('li'):
                 li_items.append(get_text_content(li).strip())
+        elif t.name == 'li':
+            li_items.append(get_text_content(t).strip())
         elif t.name in ('p', 'h1', 'h2', 'h3', 'h4'):
             p_items.append(get_text_content(t).strip())
 
@@ -1114,7 +1116,7 @@ def parse_doc_html(html_content):
                 continue
             if re.match(r'^\d{1,2}:\d{2}$', item):  # time like "08:00" — skip
                 continue
-            if re.match(r'^\d{1,2}\.\d{1,2}', item) and not doc_date:
+            if re.match(r'^\d{1,2}\s*\.\s*\d{1,2}', item) and not doc_date:
                 doc_date = _norm_date(item)
             elif not doc_campaign and re.match(r'^[a-zA-Zа-яА-ЯёЁ][a-zA-Zа-яА-ЯёЁ0-9\-_]*$', item):
                 doc_campaign = item
