@@ -2385,6 +2385,8 @@ def api_parse():
         'footnotes': parsed['footnotes'],
         'doc_campaign': parsed.get('doc_campaign', ''),
         'doc_date': parsed.get('doc_date', ''),
+        'doc_title': parsed.get('doc_title', ''),
+        'sender': parsed.get('sender', ''),
     }
     if ai_error:
         response_data['ai_warning'] = f'AI парсинг недоступен: {ai_error}'
@@ -2680,6 +2682,7 @@ def api_push_to_mail():
         'mailings': [mailing],
     }
 
+    logging.info(f"push-to-mail: name={name!r} transport={transport} html_len={len(html)} preheader={bool(preheader)} sender={sender_name!r}")
     try:
         resp = requests.post(f'{mail_url}/api/mailings', json=payload, headers=headers, timeout=30)
         if resp.status_code == 401:
