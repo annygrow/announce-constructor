@@ -1169,7 +1169,7 @@ const _CH_TAG = { tg_gc: 'tg', max: 'max' };
 function buildMailingName(channelKey) {
   const campaign = document.getElementById('utmCampaign')?.value.trim() || '';
   const date     = document.getElementById('utmDate')?.value.trim() || '';
-  const title    = (parsedData.doc_title || '').trim();
+  const title    = (parsedData.doc_title || document.getElementById('subjectField')?.value || '').trim();
   const chTag    = _CH_TAG[channelKey];
   let name = '[announce]';
   if (chTag) name += `[${chTag}]`;
