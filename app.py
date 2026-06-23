@@ -2701,9 +2701,10 @@ def api_push_to_mail():
         'mailings': [mailing],
     }
 
-    logging.info(f"push-to-mail: name={name!r} transport={transport} html_len={len(html)} preheader={bool(preheader)} sender={sender_name!r}")
+    logging.info(f"push-to-mail: name={name!r} transport={transport} html_len={len(html)} html_snippet={html[:120]!r} preheader={preheader!r} sender={sender_name!r}")
     try:
         resp = requests.post(f'{mail_url}/api/mailings', json=payload, headers=headers, timeout=30)
+        logging.info(f"push-to-mail response: status={resp.status_code} body={resp.text[:500]!r}")
         if resp.status_code == 401:
             return jsonify({'error': 'Неверный токен авторизации'}), 401
         if resp.status_code == 400:
