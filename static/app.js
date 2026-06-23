@@ -1220,18 +1220,34 @@ async function confirmPushToMail(channelKey) {
     });
     const data = await resp.json();
     if (data.ok) {
-      if (data.gc_url) {
-        statusEl.innerHTML = `✓ Создано! <a href="${data.gc_url}" target="_blank" style="color:#a78bfa;text-decoration:underline">Открыть черновик →</a>`;
-      } else {
-        statusEl.textContent = '✓ Создано!';
-        setTimeout(() => closeMailForm(channelKey), 4000);
-      }
+      statusEl.textContent = '⏳ Ожидаю черновик...';
+      pollJobForUrl(data.job_id, statusEl, channelKey);
     } else {
       statusEl.textContent = '⚠ ' + (data.error || 'Ошибка');
     }
   } catch (e) {
     statusEl.textContent = '⚠ ' + e.message;
   }
+}
+
+async function pollJobForUrl(jobId, statusEl, channelKey) {
+  const maxAttempts = 30;
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const r = await fetch(`/api/job-status/${jobId}`);
+      const d = await r.json();
+      if (d.gc_url) {
+        statusEl.innerHTML = `✓ Создано! <a href="${d.gc_url}" target="_blank" style="color:#a78bfa;text-decoration:underline">Открыть черновик →</a>`;
+        return;
+      }
+      if (d.status && !['pending', 'processing', 'creating'].includes(d.status)) {
+        statusEl.textContent = '✓ Создано!';
+        return;
+      }
+    } catch (_) {}
+  }
+  statusEl.textContent = '✓ Создано!';
 }
 
 // ---------------------------------------------------------------------------

@@ -2752,33 +2752,34 @@ def api_push_to_mail():
         resp.raise_for_status()
         result = resp.json()
         job_id = result.get('job_id')
-
-        # Poll job status to get draft ID
-        gc_url = None
-        if job_id:
-            import time
-            gc_domain = os.getenv('GC_DOMAIN', 'university.zerocoder.ru')
-            for _ in range(15):
-                time.sleep(2)
-                job_resp = requests.get(f'{mail_url}/api/jobs/{job_id}', headers=headers, timeout=15)
-                logging.info(f"push-to-mail job status: {job_resp.status_code} body={job_resp.text[:500]!r}")
-                try:
-                    job_data = job_resp.json()
-                    status = job_data.get('status', '')
-                    results = job_data.get('results', [])
-                    if results:
-                        mailing_id = results[0].get('id') or results[0].get('mailing_id')
-                        if mailing_id:
-                            gc_url = f'https://{gc_domain}/pl/letters/{mailing_id}/edit'
-                            logging.info(f"push-to-mail gc_url={gc_url}")
-                            break
-                    if status not in ('pending', 'processing', 'creating'):
-                        break
-                except Exception:
-                    break
-
-        return jsonify({'ok': True, 'job_id': job_id, 'gc_url': gc_url, 'count': result.get('count', 1)})
+        return jsonify({'ok': True, 'job_id': job_id, 'count': result.get('count', 1)})
     except requests.RequestException as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/job-status/<job_id>')
+def api_job_status(job_id):
+    mail_url = os.getenv('MAIL_API_URL', 'https://mail.zerocoder.info')
+    mail_token = os.getenv('MAIL_API_TOKEN', '')
+    gc_domain = os.getenv('GC_DOMAIN', 'university.zerocoder.ru')
+    headers = {'Authorization': f'Bearer {mail_token}'}
+    try:
+        resp = requests.get(f'{mail_url}/api/jobs/{job_id}', headers=headers, timeout=15)
+        job_data = resp.json()
+        logging.info(f"job-status {job_id}: {job_data}")
+        results = job_data.get('results', [])
+        gc_url = None
+        if results:
+            mailing_id = results[0].get('id') or results[0].get('mailing_id')
+            if mailing_id:
+                gc_url = f'https://{gc_domain}/pl/letters/{mailing_id}/edit'
+        return jsonify({
+            'status': job_data.get('status'),
+            'gc_url': gc_url,
+            'done': job_data.get('done', 0),
+            'total': job_data.get('total', 1),
+        })
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
