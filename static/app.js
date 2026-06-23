@@ -1220,8 +1220,12 @@ async function confirmPushToMail(channelKey) {
     });
     const data = await resp.json();
     if (data.ok) {
-      statusEl.textContent = `✓ Создано! job: ${data.job_id}`;
-      setTimeout(() => closeMailForm(channelKey), 4000);
+      if (data.gc_url) {
+        statusEl.innerHTML = `✓ Создано! <a href="${data.gc_url}" target="_blank" style="color:#a78bfa;text-decoration:underline">Открыть черновик →</a>`;
+      } else {
+        statusEl.textContent = '✓ Создано!';
+        setTimeout(() => closeMailForm(channelKey), 4000);
+      }
     } else {
       statusEl.textContent = '⚠ ' + (data.error || 'Ошибка');
     }
