@@ -2721,7 +2721,6 @@ def api_push_to_mail():
     if not mail_token:
         return jsonify({'error': 'MAIL_API_TOKEN не настроен в .env'}), 500
 
-    transport = _GC_TRANSPORT.get(channel_key, 'email')
     headers = {'Authorization': f'Bearer {mail_token}', 'Content-Type': 'application/json'}
     mailing_tags = ['announce']
     if campaign:
@@ -2730,19 +2729,15 @@ def api_push_to_mail():
         'name': name,
         'subject': subject,
         'html': html,
-        'transport': transport,
-        'sender_name': sender_name,
         'tags': mailing_tags,
     }
-    if preheader:
-        mailing['preheader'] = preheader
     payload = {
         'category': '0',
         'tags': [date_tag] if date_tag else [],
         'mailings': [mailing],
     }
 
-    logging.info(f"push-to-mail: name={name!r} transport={transport} html_len={len(html)} html_snippet={html[:120]!r} preheader={preheader!r} sender={sender_name!r}")
+    logging.info(f"push-to-mail: name={name!r} html_len={len(html)} html_snippet={html[:120]!r} preheader={preheader!r}")
     try:
         resp = requests.post(f'{mail_url}/api/mailings', json=payload, headers=headers, timeout=30)
         logging.info(f"push-to-mail response: status={resp.status_code} body={resp.text[:500]!r}")
@@ -2754,7 +2749,23 @@ def api_push_to_mail():
             return jsonify({'error': 'Ошибка формата: ' + resp.text}), 422
         resp.raise_for_status()
         result = resp.json()
-        return jsonify({'ok': True, 'job_id': result.get('job_id'), 'count': result.get('count', 1)})
+        job_id = result.get('job_id')
+
+        # Poll job status to log draft IDs
+        if job_id:
+            import time
+            for _ in range(6):
+                time.sleep(2)
+                job_resp = requests.get(f'{mail_url}/api/jobs/{job_id}', headers=headers, timeout=15)
+                logging.info(f"push-to-mail job status: {job_resp.status_code} body={job_resp.text[:500]!r}")
+                try:
+                    job_data = job_resp.json()
+                    if job_data.get('status') not in ('pending', 'processing'):
+                        break
+                except Exception:
+                    break
+
+        return jsonify({'ok': True, 'job_id': job_id, 'count': result.get('count', 1)})
     except requests.RequestException as e:
         return jsonify({'error': str(e)}), 500
 
