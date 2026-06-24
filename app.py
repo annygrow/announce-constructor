@@ -2391,6 +2391,10 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         if '\n' in inner:
             sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
             for part in sub_parts:
+                # Close any tags split across the \n boundary (e.g. <i> opened before \n)
+                for t in ('i', 'b', 'u', 's'):
+                    if part.count(f'<{t}>') > part.count(f'</{t}>'):
+                        part += f'</{t}>'
                 result_parts.append(f'<p>{part}</p>')
         else:
             result_parts.append(f'<p>{inner}</p>')
