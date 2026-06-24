@@ -593,6 +593,14 @@ def is_section_header(tag):
     if not text:
         return None
 
+    # Early check: merged paragraph where label is the very first word and content follows.
+    # Example: "Телеграм🎉Ты уже в самой продвинутой тусовке..."
+    # Must run BEFORE the length guard, since merged paragraphs are long.
+    _first_word_raw = text.split()[0] if text.split() else ''
+    _first_word_alpha = ''.join(ch for ch in _first_word_raw if ch.isalpha())
+    if _first_word_alpha in {'телеграм', 'telegram'} and text != _first_word_alpha:
+        return 'tg_section'
+
     # Section headers are short labels, not body sentences
     if len(text) > 120:
         return None
@@ -647,10 +655,13 @@ def is_section_header(tag):
     if text in tg_exact:
         return 'tg_section'
 
-    # Handle merged paragraph: label + first content line in one <p> (e.g. "Телеграм\n30+ продуктов...")
+    # Handle merged paragraph: label + first content line in one <p> (e.g. "Телеграм\n🎉Ты уже...")
     # Google Docs sometimes puts the section label and first line in the same paragraph via <br> tags.
+    # No length limit here — the merged paragraph can be arbitrarily long.
     first_word = text.split()[0] if text.split() else ''
-    if first_word in {'телеграм', 'telegram'} and len(text) <= 120:
+    # Also handle label glued to emoji without space: "Телеграм🎉..."
+    first_word_alpha = ''.join(ch for ch in first_word if ch.isalpha()).lower()
+    if first_word_alpha in {'телеграм', 'telegram'}:
         return 'tg_section'
 
     # Skip standalone single-word channel-type labels that appear in config tables
@@ -942,15 +953,25 @@ def parse_doc_html(html_content):
             full_text = get_text_content(tag).strip()
             tg_subsections.append({'name': full_text[:50], 'blocks': []})
             current_section = 'tg_section'
-            # If merged paragraph (label + content in same <p>), preserve content without label
-            first_word = full_text.split()[0].lower() if full_text.split() else ''
-            if full_text.lower() != first_word:
-                # Clone the tag, remove the first span that is just the section label
+            # If merged paragraph (label + content in same <p>), preserve content without label.
+            # "Merged" means the paragraph has more than just the section-label word.
+            # We detect this by checking that the tag contains at least two distinct spans
+            # (the label span and the content span), or the text is longer than the label alone.
+            tg_label_words = {'телеграм', 'telegram', 'тг', 'tg', 'max'}
+            full_lower = full_text.lower()
+            # Strip leading alpha chars to get the label (handles "Телеграм🎉..." glued together)
+            first_word_raw = full_text.split()[0] if full_text.split() else ''
+            first_word_alpha = ''.join(ch for ch in first_word_raw if ch.isalpha()).lower()
+            is_merged = first_word_alpha in tg_label_words and full_lower != first_word_alpha
+            if is_merged:
+                # Clone the tag, remove the first span that is the section label
                 tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
                 if tag_copy:
                     for span in list(tag_copy.find_all('span')):
-                        span_text = get_text_content(span).lower().strip()
-                        if span_text == first_word:
+                        span_text_alpha = ''.join(
+                            ch for ch in get_text_content(span).strip() if ch.isalpha()
+                        ).lower()
+                        if span_text_alpha == first_word_alpha:
                             span.decompose()
                             break
                     if get_text_content(tag_copy).strip():
