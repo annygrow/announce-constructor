@@ -2314,6 +2314,14 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
         output = output.replace('{first_name}', '{firstName}')
 
+    # Remove empty paragraphs: <p></p>, <p><b></b></p>, <p>&nbsp;</p>, <p></b><b></p>, etc.
+    output = re.sub(
+        r'<p>(?:\s|&nbsp;|\xa0|</?b>|</?i>|</?u>|</?s>)*</p>\s*',
+        '', output, flags=re.IGNORECASE
+    )
+    # Collapse runs of spacer paragraphs into one
+    output = re.sub(r'(<p>&nbsp;</p>\s*){2,}', '<p>&nbsp;</p>\n', output)
+
     # Legal notice
     output += '\n<p>&nbsp;</p>\n<p>РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>\n<p>ИНН 9715401631</p>'
     return output
