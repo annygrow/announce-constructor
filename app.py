@@ -1568,6 +1568,8 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                     if images and user_img_idx is not None and user_img_idx[0] < len(images):
                         img_src = images[user_img_idx[0]]
                         user_img_idx[0] += 1
+                        # Update the item so meta picks up the resolved URL (not base64)
+                        item['src'] = img_src
                     else:
                         continue
                 inner_rows.append(
@@ -1622,12 +1624,20 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
             for i in items if i['kind'] == 'btn'
         ]
 
+        # Store the first embedded image URL for the editor (if any)
+        first_img_item = next((i for i in items if i['kind'] == 'img'), None)
+        img_url_meta = first_img_item['src'] if first_img_item else ''
+        # If it's still base64 at this point (no user image was provided), store empty
+        if img_url_meta.startswith('data:image'):
+            img_url_meta = ''
+
         meta = {
             'type': 'block_blue_cta',
             'paragraphs_html': paragraphs_html,
             'btn_text': btn_text_meta,
             'btn_url_utm': btn_url_meta,
             'buttons': all_btns_meta,
+            'image_url': img_url_meta,
             'preview_text': preview_text,
         }
         return html, meta
@@ -1793,8 +1803,16 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
 
             if not two_col_cells:
                 # Normal table: check for CTA button before deciding whether to flush
+                # Include <p> tags that contain an <img> even when they have no text content.
+                def _keep_tag(t):
+                    if _is_reklama(t):
+                        return False
+                    if t.get_text(strip=True):
+                        return True
+                    # Empty-text <p> that wraps an image (Google Docs embeds images this way)
+                    return t.name == 'p' and bool(t.find('img'))
                 inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
-                         if t.get_text(strip=True) and not _is_reklama(t)]
+                         if _keep_tag(t)]
                 has_inner_btn = bool(inner and any(
                     _BTN_BRACKET_RE.match(_strip_trailing_footnotes(t.get_text(strip=True))) for t in inner))
                 has_inner_text = bool(inner and any(
@@ -1863,7 +1881,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
 
             # 2-col detected but no pattern matched — fall back to normal table rendering
             inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
-                     if t.get_text(strip=True) and not _is_reklama(t)]
+                     if (t.get_text(strip=True) or (t.name == 'p' and t.find('img'))) and not _is_reklama(t)]
             if inner:
                 row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
                 if row:
@@ -2743,6 +2761,7 @@ def api_assemble_email():
 
         if btype == 'block_blue_cta':
             buttons = block.get('buttons') or [{'text': btn_text, 'url': btn_url_utm}]
+            img_url_cta = block.get('image_url', '')
             BTN_A = ("background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
                      "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
                      "font-size:16px;display:inline-block;font-weight:600")
@@ -2752,12 +2771,21 @@ def api_assemble_email():
                 f'</td></tr>\n'
                 for b in buttons
             )
+            # Optional image row at the top of the CTA block
+            img_row = ''
+            if img_url_cta:
+                img_row = (
+                    '<tr><td align="center" bgcolor="#1445ea" style="padding:8px 10px 4px;font-size:0px">\n'
+                    f'<img src="{img_url_cta}" alt="" style="display:block;border:0;max-width:100%;border-radius:8px">\n'
+                    '</td></tr>\n'
+                )
             if ph.strip():
                 row = (
                     '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
                     '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
                     'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
-                    '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px 5px;margin:0;'
+                    + img_row
+                    + '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px 5px;margin:0;'
                     'font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;'
                     'line-height:27px;color:#ffffff">\n'
                     + ph + '\n</td></tr>\n'
@@ -2769,6 +2797,7 @@ def api_assemble_email():
                     '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
                     '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
                     'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
+                    + img_row
                     + btn_rows
                     + '</table></td></tr>'
                 )
