@@ -2318,15 +2318,16 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
         output = output.replace('{first_name}', '{firstName}')
 
-    # Remove empty formatting tags: <b></b>, <b>\n</b>, <b>  </b> etc.
+    # Remove empty formatting tags: <b></b>, <b>\n</b> etc.
     output = re.sub(r'<(b|i|u|s)>\s*</\1>', '', output, flags=re.IGNORECASE)
     # Remove stray closing tags right after <p> opening: <p></b>text → <p>text
     output = re.sub(r'(<p>)(\s*(?:</b>|</i>|</u>|</s>))+', r'\1', output, flags=re.IGNORECASE)
-    # Remove empty paragraphs that have no visible text (but preserve &nbsp; spacers)
-    output = re.sub(
-        r'<p>(?:\s|</?b>|</?i>|</?u>|</?s>)*</p>\s*',
-        '', output, flags=re.IGNORECASE
-    )
+    # Remove truly empty paragraphs (no visible text; &nbsp; spacers are preserved)
+    output = re.sub(r'<p>(?:\s|</?b>|</?i>|</?u>|</?s>)*</p>\s*', '', output, flags=re.IGNORECASE)
+    # Collapse multiple consecutive &nbsp; spacers into one
+    output = re.sub(r'(<p>&nbsp;</p>\s*){2,}', '<p>&nbsp;</p>\n', output)
+    # Strip leading spacers before first real paragraph
+    output = re.sub(r'^(\s*<p>&nbsp;</p>\s*)+', '', output)
 
     # Legal notice
     output += '\n<p>&nbsp;</p>\n<p>РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>\n<p>ИНН 9715401631</p>'
