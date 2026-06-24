@@ -23,11 +23,11 @@ def _upload_image_to_yc(data_uri: str):
     import base64, hashlib, boto3
     from botocore.client import Config
 
-    key_id  = os.environ.get('AWS_KEY_ID_DEFAULT', '').strip()
-    secret  = os.environ.get('AWS_SECRET_KEY_DEFAULT', '').strip()
-    bucket  = os.environ.get('BUCKET_NAME_DEFAULT', 'image-lessons').strip()
-    region  = os.environ.get('YC_REGION_DEFAULT', 'ru-central1').strip()
-    storage_url = os.environ.get('YC_STORAGE_URL_DEFAULT', 'https://storage.yandexcloud.net').strip()
+    key_id  = os.environ.get('YC_ACCESS_KEY_ID', '').strip()
+    secret  = os.environ.get('YC_SECRET_ACCESS_KEY', '').strip()
+    bucket  = os.environ.get('YC_BUCKET', 'image-lessons').strip()
+    region  = os.environ.get('YC_REGION', 'ru-central1').strip()
+    storage_url = os.environ.get('YC_STORAGE_URL', 'https://storage.yandexcloud.net').strip()
 
     if not key_id or not secret:
         return None
