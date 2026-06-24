@@ -13,6 +13,62 @@ from config import CHANNELS, LOGO_URL, SITE_URL, PHONE, LEGAL_NOTICE
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Yandex Cloud Storage — загрузка base64-картинок из Google Docs
+# ---------------------------------------------------------------------------
+
+def _upload_image_to_yc(data_uri: str):
+    """Upload base64 data URI image to Yandex Cloud Storage.
+    Returns public URL string on success, None on failure or missing credentials."""
+    import base64, hashlib, boto3
+    from botocore.client import Config
+
+    key_id = os.environ.get('YC_ACCESS_KEY_ID', '').strip()
+    secret = os.environ.get('YC_SECRET_ACCESS_KEY', '').strip()
+    bucket = os.environ.get('YC_BUCKET', 'image-lessons').strip()
+
+    if not key_id or not secret:
+        return None
+
+    if not data_uri.startswith('data:image/'):
+        return None
+
+    try:
+        header, b64data = data_uri.split(',', 1)
+        # data:image/png;base64 → image/png
+        content_type = header.split(':')[1].split(';')[0]
+        ext = content_type.split('/')[1]  # png, jpeg, gif, webp
+
+        img_bytes = base64.b64decode(b64data)
+        # Stable filename: same content → same URL, no duplicates in bucket
+        img_hash = hashlib.md5(img_bytes).hexdigest()[:12]
+        filename = f'gdoc-images/{img_hash}.{ext}'
+
+        session_boto = boto3.session.Session()
+        s3 = session_boto.client(
+            service_name='s3',
+            endpoint_url='https://storage.yandexcloud.net',
+            aws_access_key_id=key_id,
+            aws_secret_access_key=secret,
+            config=Config(signature_version='s3v4'),
+            region_name='ru-central1',
+        )
+
+        s3.put_object(
+            Bucket=bucket,
+            Key=filename,
+            Body=img_bytes,
+            ContentType=content_type,
+            ACL='public-read',
+        )
+
+        public_url = f'https://storage.yandexcloud.net/{bucket}/{filename}'
+        logging.info(f'[YC Upload] Uploaded image → {public_url}')
+        return public_url
+    except Exception as e:
+        logging.warning(f'[YC Upload] Error: {e}')
+        return None
+
 logging.basicConfig(
     filename='debug.log',
     level=logging.DEBUG,
@@ -1563,12 +1619,15 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
             elif item['kind'] == 'img':
                 img_src = item['src']
                 # Google Docs embeds images as base64 data URIs — not suitable for email.
-                # Replace with the next user-provided image URL if available.
+                # Try YC upload first; fall back to user-provided URL if credentials missing.
                 if img_src.startswith('data:image'):
-                    if images and user_img_idx is not None and user_img_idx[0] < len(images):
+                    yc_url = _upload_image_to_yc(img_src)
+                    if yc_url:
+                        img_src = yc_url
+                        item['src'] = img_src
+                    elif images and user_img_idx is not None and user_img_idx[0] < len(images):
                         img_src = images[user_img_idx[0]]
                         user_img_idx[0] += 1
-                        # Update the item so meta picks up the resolved URL (not base64)
                         item['src'] = img_src
                     else:
                         continue
@@ -1648,12 +1707,15 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
     for img_item in img_items:
         img_src = img_item['src']
         if img_src.startswith('data:image'):
-            # Replace base64 with next user-provided image URL if available
-            if images and user_img_idx is not None and user_img_idx[0] < len(images):
+            # Try YC upload first; fall back to user-provided URL if credentials missing.
+            yc_url = _upload_image_to_yc(img_src)
+            if yc_url:
+                img_src = yc_url
+            elif images and user_img_idx is not None and user_img_idx[0] < len(images):
                 img_src = images[user_img_idx[0]]
                 user_img_idx[0] += 1
             else:
-                continue  # no URL supplied — skip
+                continue  # no URL supplied and no YC — skip
         if img_src.startswith('http'):
             return block_image_center(img_src), {
                 'type': 'block_image',
