@@ -609,7 +609,10 @@ def is_section_header(tag):
                 # Group separators: start a new email variant (and later TG variant within them)
                 # "Другие источники" contains Unisender email + Voronki TG content
                 'другие источники', 'другие каналы', 'другой источник', 'другие боты',
-                'другой текст']
+                'другой текст',
+                # Abbreviated forms actually used in documents
+                'для др источников', 'для других источников', 'др источники',
+                'для др. источников', 'другой ист', 'другие ист']
     tg_kw = ['телеграм/max', 'телеграм/макс', 'telegram/max', 'telegram/макс', 'тг/max', 'тг/макс', 'тг+max',
              'телеграм бот', 'тг бот', 'telegram бот', 'текст для тг', 'для телеграм', 'для тг',
              'телеграм (', 'тг (', 'telegram (', 'тг:', 'тг+мax',
@@ -1355,9 +1358,26 @@ _FOOTNOTE_REF_RE = re.compile(r'^\[[a-z0-9]{1,3}\]$', re.IGNORECASE)
 # Trailing footnote refs like [a], [b], [1] appended by Google Docs to button text
 _TRAILING_FOOTNOTE_RE = re.compile(r'(\[[a-z0-9]{1,3}\])+\s*$', re.IGNORECASE)
 
+# Inline footnote refs that appear between button text and body text (after <br/>):
+# e.g. "[КНОПКА][b]Дополнительный текст" — [b] is a footnote marker, not button content
+# Pattern: ']' then immediately '[single-letter/digit]' then more substantial text follows
+_INLINE_FOOTNOTE_RE = re.compile(r'(\])\s*(?:\[[a-z0-9]{1,3}\])+\s*(?=\S)', re.IGNORECASE)
+
 def _strip_trailing_footnotes(text):
     """Remove trailing Google Docs footnote markers like [a][b] from text."""
     return _TRAILING_FOOTNOTE_RE.sub('', text).strip()
+
+def _strip_button_footnotes(text):
+    """Remove inline Google Docs footnote markers that appear immediately after a closing
+    bracket and before additional body text, e.g. '[КНОПКА][b]Текст' → '[КНОПКА]Текст'.
+    This handles the Google Docs pattern where a <sup> footnote ref is placed between the
+    button span and a descriptive text span (both separated by <br/> in the original).
+    Also strips trailing footnotes."""
+    # Remove inline footnote refs after ']' before body text
+    text = _INLINE_FOOTNOTE_RE.sub(r'\1 ', text)
+    # Remove trailing footnote refs
+    text = _TRAILING_FOOTNOTE_RE.sub('', text).strip()
+    return text
 
 _CHECKMARKS = ['✅', '❌', '☑', '☒']
 _FEATURE_EMOJI = ['💎', '🎁', '🎯', '📌', '🔑', '⭐', '🏆', '💡', '🚀', '📅', '🗓', '📢']
@@ -1381,14 +1401,18 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
 
     for tag in tags:
         tag_text = tag.get_text(strip=True)
-        # Strip trailing Google Docs footnote markers like [a][b] before button detection
-        tag_text_clean = _strip_trailing_footnotes(tag_text)
+        # Strip trailing AND inline Google Docs footnote markers before button detection.
+        # _strip_button_footnotes also handles the pattern "[КНОПКА][b]Дополнительный текст"
+        # where [b] is an inline <sup> footnote ref placed between the button and body text.
+        tag_text_clean = _strip_button_footnotes(tag_text)
 
         # Case -1: paragraph containing only an image (no text)
         if not tag_text_clean and tag.name == 'p':
             img_tag = tag.find('img')
-            if img_tag and img_tag.get('src', '').startswith('http'):
-                items.append({'kind': 'img', 'src': img_tag['src']})
+            # Accept both http URLs and base64-encoded images from Google Docs
+            img_src = img_tag.get('src', '') if img_tag else ''
+            if img_src and (img_src.startswith('http') or img_src.startswith('data:image')):
+                items.append({'kind': 'img', 'src': img_src})
                 continue
 
         # Case 0: "Кнопка: TEXT" — handles one or multiple buttons in same tag (via <br>)
@@ -1409,6 +1433,39 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
             a = tag.find('a', href=True)
             items.append({'kind': 'btn', 'text': btn_label, 'url': a.get('href', '#') if a else '#'})
             continue
+
+        # Case 1.5: Google Docs pattern — [BUTTON] span + <br/> + <sup>[footnote]</sup> + <br/> + text span.
+        # get_text() collapses these into "[BUTTON][footnote]text", which breaks Case 1.
+        # Detect by checking if the FIRST span in the tag is a button, and the tag contains a <br>.
+        if tag.find('br') and tag.name == 'p':
+            first_span = tag.find('span')
+            if first_span:
+                first_span_text = _strip_trailing_footnotes(first_span.get_text(strip=True))
+                m_fs = _BTN_BRACKET_RE.match(first_span_text)
+                if m_fs:
+                    fs_prefix = m_fs.group(1).strip()
+                    fs_inner = m_fs.group(2).strip()
+                    btn_label = f'{fs_prefix} {fs_inner}'.strip() if fs_prefix else fs_inner
+                    a = tag.find('a', href=True)
+                    items.append({'kind': 'btn', 'text': btn_label, 'url': a.get('href', '#') if a else '#'})
+                    # Collect remaining text (after the button span) as a separate tag item
+                    tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                    if tag_copy:
+                        # Remove the first span (button) and any <br> and <sup> siblings
+                        for child in list(tag_copy.children):
+                            if not hasattr(child, 'name'):
+                                continue
+                            if child.name in ('br', 'sup'):
+                                child.decompose()
+                            elif child.name == 'span':
+                                span_txt = _strip_trailing_footnotes(child.get_text(strip=True))
+                                if _BTN_BRACKET_RE.match(span_txt):
+                                    child.decompose()
+                                    break  # only remove the button span
+                        remaining = tag_copy.get_text(strip=True).replace('\xa0', '').strip()
+                        if remaining:
+                            items.append({'kind': 'tag', 'tag': tag_copy})
+                    continue
 
         # Case 2: an <a> inside the tag wraps [BUTTON TEXT] (possibly with emoji before <a>)
         found_btn_anchor = False
@@ -1480,6 +1537,10 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
                         )
             elif item['kind'] == 'img':
                 img_src = item['src']
+                # Google Docs embeds images as base64 data URIs — not suitable for email.
+                # Skip base64 images in the rendered output; users supply real URLs via the UI.
+                if img_src.startswith('data:image'):
+                    continue
                 inner_rows.append(
                     '<tr><td align="center" bgcolor="#1445ea" style="padding:8px 10px 4px;font-size:0px">\n'
                     f'<img src="{img_src}" alt="" style="display:block;border:0;max-width:100%;border-radius:8px">\n'
@@ -1543,6 +1604,19 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
         return html, meta
 
     # Non-CTA blocks: render all tag items as paragraphs
+    # Handle standalone image items first (outside CTA context)
+    img_items = [i for i in items if i['kind'] == 'img']
+    for img_item in img_items:
+        img_src = img_item['src']
+        if not img_src.startswith('data:image') and img_src.startswith('http'):
+            return block_image_center(img_src), {
+                'type': 'block_image',
+                'image_url': img_src,
+                'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '',
+                'preview_text': 'Картинка',
+            }
+        # base64 image: skip — user will supply URL via the UI
+
     p_parts = []
     for item in items:
         if item['kind'] != 'tag':
@@ -1791,9 +1865,10 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 pending_tags.append(el)
             else:
                 # Empty paragraph: check if it contains an image (Google Docs exports
-                # images as <p><img src="..."/></p> with no text content)
+                # images as <p><img src="..."/></p> with no text content, or as base64)
                 img_tag = el.find('img')
-                if img_tag and img_tag.get('src', '').startswith('http'):
+                img_src = img_tag.get('src', '') if img_tag else ''
+                if img_src and (img_src.startswith('http') or img_src.startswith('data:image')):
                     pending_tags.append(el)
                 else:
                     flush_pending()
