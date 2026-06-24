@@ -1382,7 +1382,7 @@ def _strip_button_footnotes(text):
 _CHECKMARKS = ['✅', '❌', '☑', '☒']
 _FEATURE_EMOJI = ['💎', '🎁', '🎯', '📌', '🔑', '⭐', '🏆', '💡', '🚀', '📅', '🗓', '📢']
 
-def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
+def render_block_from_tags(tags, channel_key, campaign, date, segment='', images=None, user_img_idx=None):
     """
     Given a list of BS4 tags from one logical block, build an email table row.
     Detects [BUTTON TEXT] CTAs, checkmark lists, feature emoji, etc.
@@ -1538,9 +1538,13 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
             elif item['kind'] == 'img':
                 img_src = item['src']
                 # Google Docs embeds images as base64 data URIs — not suitable for email.
-                # Skip base64 images in the rendered output; users supply real URLs via the UI.
+                # Replace with the next user-provided image URL if available.
                 if img_src.startswith('data:image'):
-                    continue
+                    if images and user_img_idx is not None and user_img_idx[0] < len(images):
+                        img_src = images[user_img_idx[0]]
+                        user_img_idx[0] += 1
+                    else:
+                        continue
                 inner_rows.append(
                     '<tr><td align="center" bgcolor="#1445ea" style="padding:8px 10px 4px;font-size:0px">\n'
                     f'<img src="{img_src}" alt="" style="display:block;border:0;max-width:100%;border-radius:8px">\n'
@@ -1608,14 +1612,20 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
     img_items = [i for i in items if i['kind'] == 'img']
     for img_item in img_items:
         img_src = img_item['src']
-        if not img_src.startswith('data:image') and img_src.startswith('http'):
+        if img_src.startswith('data:image'):
+            # Replace base64 with next user-provided image URL if available
+            if images and user_img_idx is not None and user_img_idx[0] < len(images):
+                img_src = images[user_img_idx[0]]
+                user_img_idx[0] += 1
+            else:
+                continue  # no URL supplied — skip
+        if img_src.startswith('http'):
             return block_image_center(img_src), {
                 'type': 'block_image',
                 'image_url': img_src,
                 'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '',
                 'preview_text': 'Картинка',
             }
-        # base64 image: skip — user will supply URL via the UI
 
     p_parts = []
     for item in items:
@@ -1730,7 +1740,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
     def flush_pending():
         if not pending_tags:
             return
-        row, meta = render_block_from_tags(list(pending_tags), channel_key, campaign, date, segment)
+        row, meta = render_block_from_tags(list(pending_tags), channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
         if row:
             raw_blocks.append((row, meta))
         pending_tags.clear()
@@ -1770,14 +1780,14 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                     # merge pre-table paragraphs into the CTA block
                     combined = list(pending_tags) + inner
                     pending_tags.clear()
-                    row, meta = render_block_from_tags(combined, channel_key, campaign, date, segment)
+                    row, meta = render_block_from_tags(combined, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
                     if row:
                         raw_blocks.append((row, meta))
                 else:
                     # Table has its own body text, or no button — flush pending separately
                     flush_pending()
                     if inner:
-                        row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment)
+                        row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
                         if row:
                             raw_blocks.append((row, meta))
                 return
@@ -1830,7 +1840,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                      if t.get_text(strip=True) and not _is_reklama(t)]
             if inner:
-                row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment)
+                row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
                 if row:
                     raw_blocks.append((row, meta))
         elif el.name in ('h1', 'h2', 'h3', 'h4', 'ul', 'ol'):
