@@ -2318,7 +2318,11 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
         output = output.replace('{first_name}', '{firstName}')
 
-    # Remove empty paragraphs: <p></p>, <p><b></b></p>, <p>&nbsp;</p>, <p></b><b></p>, etc.
+    # Remove empty formatting tags: <b></b>, <b>\n</b>, <b>  </b> etc.
+    output = re.sub(r'<(b|i|u|s)>\s*</\1>', '', output, flags=re.IGNORECASE)
+    # Remove stray closing tags right after <p> opening: <p></b>text → <p>text
+    output = re.sub(r'(<p>)(\s*(?:</b>|</i>|</u>|</s>))+', r'\1', output, flags=re.IGNORECASE)
+    # Remove empty paragraphs: <p></p>, <p><b></b></p>, <p>&nbsp;</p>, etc.
     output = re.sub(
         r'<p>(?:\s|&nbsp;|\xa0|</?b>|</?i>|</?u>|</?s>)*</p>\s*',
         '', output, flags=re.IGNORECASE
@@ -2383,6 +2387,10 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
     output = re.sub(r'\{(?:<[^>]+>)*([\w]+)(?:<[^>]+>)*\}', r'{\1}', output)
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
         output = output.replace('{first_name}', '{firstName}')
+    # Remove empty formatting tags: <b></b>, <b>\n</b> etc.
+    output = re.sub(r'<(b|i|u|s)>\s*</\1>', '', output, flags=re.IGNORECASE)
+    # Remove stray closing tags at line start
+    output = re.sub(r'^(\s*)(?:</b>|</i>|</u>|</s>)+', r'\1', output, flags=re.IGNORECASE | re.MULTILINE)
     output += '\n\nРЕКЛАМА ООО "ЗЕРОКОДЕР"\nИНН 9715401631'
     return output
 
