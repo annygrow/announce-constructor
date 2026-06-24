@@ -169,6 +169,11 @@ async function _doGenerate() {
   rebuildTabBar(data);
 
   autoFillUtmFromDocLinks(data.doc_urls || []);
+
+  // Auto-fill image URL fields with URLs uploaded to YC Storage during generation
+  if (data.uploaded_image_urls && data.uploaded_image_urls.length > 0) {
+    fillUploadedImageUrls(data.uploaded_image_urls);
+  }
 }
 
 function setLoadingState(on) {
@@ -1437,6 +1442,25 @@ function getImageUrls() {
   return [...document.querySelectorAll('#imageFields input')]
     .map(el => el.value.trim())
     .filter(Boolean);
+}
+
+function fillUploadedImageUrls(urls) {
+  const container = document.getElementById('imageFields');
+  if (!container) return;
+
+  const inputs = [...container.querySelectorAll('.image-field input')];
+
+  urls.forEach((url, i) => {
+    if (i < inputs.length) {
+      // Fill existing field
+      inputs[i].value = url;
+    } else {
+      // Add new field and fill it
+      addImageField();
+      const newInputs = [...container.querySelectorAll('.image-field input')];
+      newInputs[newInputs.length - 1].value = url;
+    }
+  });
 }
 
 function setButtonLoading(btn, text) {

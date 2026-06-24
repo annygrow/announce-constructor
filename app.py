@@ -1466,11 +1466,12 @@ def _strip_button_footnotes(text):
 _CHECKMARKS = ['✅', '❌', '☑', '☒']
 _FEATURE_EMOJI = ['💎', '🎁', '🎯', '📌', '🔑', '⭐', '🏆', '💡', '🚀', '📅', '🗓', '📢']
 
-def render_block_from_tags(tags, channel_key, campaign, date, segment='', images=None, user_img_idx=None):
+def render_block_from_tags(tags, channel_key, campaign, date, segment='', images=None, user_img_idx=None, uploaded_urls=None):
     """
     Given a list of BS4 tags from one logical block, build an email table row.
     Detects [BUTTON TEXT] CTAs, checkmark lists, feature emoji, etc.
     Returns (html_string, meta_dict) or (None, None).
+    uploaded_urls: optional list to collect YC Storage URLs uploaded during rendering.
     """
     tags = [t for t in tags if not _is_reklama(t)]
     if not tags:
@@ -1628,6 +1629,8 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                     if yc_url:
                         img_src = yc_url
                         item['src'] = img_src
+                        if uploaded_urls is not None:
+                            uploaded_urls.append(yc_url)
                     elif images and user_img_idx is not None and user_img_idx[0] < len(images):
                         img_src = images[user_img_idx[0]]
                         user_img_idx[0] += 1
@@ -1714,6 +1717,8 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
             yc_url = _upload_image_to_yc(img_src)
             if yc_url:
                 img_src = yc_url
+                if uploaded_urls is not None:
+                    uploaded_urls.append(yc_url)
             elif images and user_img_idx is not None and user_img_idx[0] < len(images):
                 img_src = images[user_img_idx[0]]
                 user_img_idx[0] += 1
@@ -1832,6 +1837,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
     raw_blocks = []  # list of (row_html, meta_dict)
     pending_tags = []
     user_img_idx = [0]  # tracks which user-provided image URL to use next
+    uploaded_urls = []  # collects YC Storage URLs uploaded during this generation
 
     # Normalize subject for deduplication — skip if first paragraph repeats it
     _subject_norm = re.sub(r'\s+', ' ', subject or '').strip()
@@ -1840,7 +1846,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
     def flush_pending():
         if not pending_tags:
             return
-        row, meta = render_block_from_tags(list(pending_tags), channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
+        row, meta = render_block_from_tags(list(pending_tags), channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
         if row:
             raw_blocks.append((row, meta))
         pending_tags.clear()
@@ -1888,14 +1894,14 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                     # merge pre-table paragraphs into the CTA block
                     combined = list(pending_tags) + inner
                     pending_tags.clear()
-                    row, meta = render_block_from_tags(combined, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
+                    row, meta = render_block_from_tags(combined, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
                     if row:
                         raw_blocks.append((row, meta))
                 else:
                     # Table has its own body text, or no button — flush pending separately
                     flush_pending()
                     if inner:
-                        row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
+                        row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
                         if row:
                             raw_blocks.append((row, meta))
                 return
@@ -1948,7 +1954,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                      if (t.get_text(strip=True) or (t.name == 'p' and t.find('img'))) and not _is_reklama(t)]
             if inner:
-                row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx)
+                row, meta = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
                 if row:
                     raw_blocks.append((row, meta))
         elif el.name in ('h1', 'h2', 'h3', 'h4', 'ul', 'ol'):
@@ -2093,7 +2099,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
         + EMAIL_FOOTER
         + EMAIL_WRAPPER_END
     )
-    return html, blocks_data
+    return html, blocks_data, uploaded_urls
 
 # ---------------------------------------------------------------------------
 # TG HTML generation
@@ -2757,6 +2763,7 @@ def api_generate():
         _add_doc_url(fn.get('url', '') if isinstance(fn, dict) else '')
 
     result = {'doc_urls': doc_urls}
+    all_uploaded_image_urls = []
 
     for ch_key in channels:
         ch_info = CHANNELS.get(ch_key)
@@ -2773,11 +2780,15 @@ def api_generate():
                 html_to_use = email_section_html
             if html_to_use:
                 try:
-                    html, blocks = generate_email_html(
+                    html, blocks, ch_uploaded_urls = generate_email_html(
                         html_to_use, ch_key, campaign, date, images, subject, segment
                     )
                     result[ch_key] = html
                     result[f'{ch_key}_blocks'] = blocks
+                    # Collect unique YC URLs (same image may appear in multiple email channels)
+                    for u in ch_uploaded_urls:
+                        if u not in all_uploaded_image_urls:
+                            all_uploaded_image_urls.append(u)
                 except Exception as e:
                     result[ch_key] = f'<!-- Error generating email: {e} -->'
 
@@ -2807,6 +2818,9 @@ def api_generate():
                 except Exception as e:
                     result[ch_key] = f'Error: {e}'
                     result[f'{ch_key}_links'] = []
+
+    if all_uploaded_image_urls:
+        result['uploaded_image_urls'] = all_uploaded_image_urls
 
     return jsonify(result)
 
