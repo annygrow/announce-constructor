@@ -23,9 +23,11 @@ def _upload_image_to_yc(data_uri: str):
     import base64, hashlib, boto3
     from botocore.client import Config
 
-    key_id = os.environ.get('YC_ACCESS_KEY_ID', '').strip()
-    secret = os.environ.get('YC_SECRET_ACCESS_KEY', '').strip()
-    bucket = os.environ.get('YC_BUCKET', 'image-lessons').strip()
+    key_id  = os.environ.get('AWS_KEY_ID_DEFAULT', '').strip()
+    secret  = os.environ.get('AWS_SECRET_KEY_DEFAULT', '').strip()
+    bucket  = os.environ.get('BUCKET_NAME_DEFAULT', 'image-lessons').strip()
+    region  = os.environ.get('YC_REGION_DEFAULT', 'ru-central1').strip()
+    storage_url = os.environ.get('YC_STORAGE_URL_DEFAULT', 'https://storage.yandexcloud.net').strip()
 
     if not key_id or not secret:
         return None
@@ -35,8 +37,7 @@ def _upload_image_to_yc(data_uri: str):
 
     try:
         header, b64data = data_uri.split(',', 1)
-        # data:image/png;base64 → image/png
-        content_type = header.split(':')[1].split(';')[0]
+        content_type = header.split(':')[1].split(';')[0]  # data:image/png;base64 → image/png
         ext = content_type.split('/')[1]  # png, jpeg, gif, webp
 
         img_bytes = base64.b64decode(b64data)
@@ -47,11 +48,11 @@ def _upload_image_to_yc(data_uri: str):
         session_boto = boto3.session.Session()
         s3 = session_boto.client(
             service_name='s3',
-            endpoint_url='https://storage.yandexcloud.net',
+            endpoint_url=storage_url,
             aws_access_key_id=key_id,
             aws_secret_access_key=secret,
             config=Config(signature_version='s3v4'),
-            region_name='ru-central1',
+            region_name=region,
         )
 
         s3.put_object(
@@ -62,7 +63,7 @@ def _upload_image_to_yc(data_uri: str):
             ACL='public-read',
         )
 
-        public_url = f'https://storage.yandexcloud.net/{bucket}/{filename}'
+        public_url = f'{storage_url}/{bucket}/{filename}'
         logging.info(f'[YC Upload] Uploaded image → {public_url}')
         return public_url
     except Exception as e:
