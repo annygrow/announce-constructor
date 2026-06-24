@@ -29,7 +29,9 @@ def _upload_image_to_yc(data_uri: str):
     region  = os.environ.get('YC_REGION', 'ru-central1').strip()
     storage_url = os.environ.get('YC_STORAGE_URL', 'https://storage.yandexcloud.net').strip()
 
+    logging.debug(f'[YC Upload] called, key_id={"SET" if key_id else "EMPTY"}, data_uri_prefix={data_uri[:30]}')
     if not key_id or not secret:
+        logging.warning('[YC Upload] Skipped — YC_ACCESS_KEY_ID or YC_SECRET_ACCESS_KEY not set in .env')
         return None
 
     if not data_uri.startswith('data:image/'):
