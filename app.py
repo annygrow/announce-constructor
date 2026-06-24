@@ -974,6 +974,10 @@ def parse_doc_html(html_content):
                         if span_text_alpha == first_word_alpha:
                             span.decompose()
                             break
+                    # Remove empty wrapper tags left after span removal (e.g. <b></b>)
+                    for empty_wrapper in tag_copy.find_all(['b', 'strong', 'i', 'em', 'u', 's']):
+                        if not empty_wrapper.get_text(strip=True) and not empty_wrapper.find():
+                            empty_wrapper.decompose()
                     if get_text_content(tag_copy).strip():
                         tg_subsections[-1]['blocks'].append(tag_copy)
             return
