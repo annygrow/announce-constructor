@@ -2282,6 +2282,10 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         inner = clean_tag_for_tg(tag).strip()
         if not inner:
             continue  # empty paragraphs skipped — spacers added uniformly below
+        # Also skip paragraphs that are HTML-only with no visible text (e.g. <b></b>, <b>&nbsp;</b>)
+        inner_text = re.sub(r'<[^>]+>', '', inner).replace('&nbsp;', '').replace('\xa0', '').strip()
+        if not inner_text:
+            continue
         inner = re.sub(r'(?:<[^>]+>)*\s*ссылка:\s*(?:<\/[^>]+>)*\s*', '', inner, flags=re.IGNORECASE).strip()
         if not inner:
             continue
