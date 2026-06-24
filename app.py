@@ -1352,6 +1352,13 @@ _BTN_BRACKET_RE = re.compile(r'^\s*([^\w\[\]]*)\[([^\]]+)\]\s*$', re.DOTALL)
 # These are Google Docs link annotations, not email content
 _FOOTNOTE_REF_RE = re.compile(r'^\[[a-z0-9]{1,3}\]$', re.IGNORECASE)
 
+# Trailing footnote refs like [a], [b], [1] appended by Google Docs to button text
+_TRAILING_FOOTNOTE_RE = re.compile(r'(\[[a-z0-9]{1,3}\])+\s*$', re.IGNORECASE)
+
+def _strip_trailing_footnotes(text):
+    """Remove trailing Google Docs footnote markers like [a][b] from text."""
+    return _TRAILING_FOOTNOTE_RE.sub('', text).strip()
+
 _CHECKMARKS = ['✅', '❌', '☑', '☒']
 _FEATURE_EMOJI = ['💎', '🎁', '🎯', '📌', '🔑', '⭐', '🏆', '💡', '🚀', '📅', '🗓', '📢']
 
@@ -1374,10 +1381,19 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
 
     for tag in tags:
         tag_text = tag.get_text(strip=True)
+        # Strip trailing Google Docs footnote markers like [a][b] before button detection
+        tag_text_clean = _strip_trailing_footnotes(tag_text)
+
+        # Case -1: paragraph containing only an image (no text)
+        if not tag_text_clean and tag.name == 'p':
+            img_tag = tag.find('img')
+            if img_tag and img_tag.get('src', '').startswith('http'):
+                items.append({'kind': 'img', 'src': img_tag['src']})
+                continue
 
         # Case 0: "Кнопка: TEXT" — handles one or multiple buttons in same tag (via <br>)
-        if re.match(r'^кнопка:\s*', tag_text, re.IGNORECASE):
-            labels = [s.strip() for s in re.split(r'(?i)\s*кнопка:\s*', tag_text) if s.strip()]
+        if re.match(r'^кнопка:\s*', tag_text_clean, re.IGNORECASE):
+            labels = [s.strip() for s in re.split(r'(?i)\s*кнопка:\s*', tag_text_clean) if s.strip()]
             links = tag.find_all('a', href=True)
             for i, lbl in enumerate(labels):
                 a = links[i] if i < len(links) else None
@@ -1385,7 +1401,7 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
             continue
 
         # Case 1: the whole tag is [BUTTON TEXT] or EMOJI [BUTTON TEXT]
-        m = _BTN_BRACKET_RE.match(tag_text)
+        m = _BTN_BRACKET_RE.match(tag_text_clean)
         if m:
             prefix = m.group(1).strip()
             btn_inner = m.group(2).strip()
@@ -1397,23 +1413,23 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
         # Case 2: an <a> inside the tag wraps [BUTTON TEXT] (possibly with emoji before <a>)
         found_btn_anchor = False
         for a in tag.find_all('a', href=True):
-            m2 = _BTN_BRACKET_RE.match(a.get_text(strip=True))
+            m2 = _BTN_BRACKET_RE.match(_strip_trailing_footnotes(a.get_text(strip=True)))
             if m2:
                 a_prefix = m2.group(1).strip()
                 btn_inner = m2.group(2).strip()
                 btn_label = f'{a_prefix} {btn_inner}'.strip() if a_prefix else btn_inner
                 # Also pick up any emoji-only text sibling that precedes the <a> in the tag
                 if not a_prefix:
-                    full_m = _BTN_BRACKET_RE.match(tag.get_text(strip=True))
+                    full_m = _BTN_BRACKET_RE.match(tag_text_clean)
                     if full_m and full_m.group(1).strip():
                         btn_label = f'{full_m.group(1).strip()} {btn_label}'.strip()
                 btn_href = a.get('href', '#')
                 tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
                 if tag_copy:
                     for ba in tag_copy.find_all('a', href=True):
-                        if _BTN_BRACKET_RE.match(ba.get_text(strip=True)):
+                        if _BTN_BRACKET_RE.match(_strip_trailing_footnotes(ba.get_text(strip=True))):
                             ba.decompose()
-                    remaining = tag_copy.get_text(strip=True)
+                    remaining = _strip_trailing_footnotes(tag_copy.get_text(strip=True))
                     # Remove the emoji prefix that's now part of the button label
                     if btn_label and remaining and remaining.startswith(m2.group(1).strip()):
                         remaining = remaining[len(m2.group(1).strip()):].strip()
@@ -1462,6 +1478,13 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment=''):
                             '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
                             + ph + '\n</td></tr>'
                         )
+            elif item['kind'] == 'img':
+                img_src = item['src']
+                inner_rows.append(
+                    '<tr><td align="center" bgcolor="#1445ea" style="padding:8px 10px 4px;font-size:0px">\n'
+                    f'<img src="{img_src}" alt="" style="display:block;border:0;max-width:100%;border-radius:8px">\n'
+                    '</td></tr>'
+                )
             elif item['kind'] == 'btn':
                 btn_url_utm = build_utm_url(item['url'], channel_key, campaign, date, segment)
                 inner_rows.append(
@@ -1568,8 +1591,9 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment='')
     buttons = []
     for tag in ctags:
         text = tag.get_text(strip=True)
+        text_clean = _strip_trailing_footnotes(text)
         # Detect [BUTTON TEXT] or EMOJI [BUTTON TEXT] hyperlink pattern
-        m_btn = _BTN_BRACKET_RE.match(text)
+        m_btn = _BTN_BRACKET_RE.match(text_clean)
         if m_btn:
             link = tag.find('a', href=True)
             if link:
@@ -1581,7 +1605,7 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment='')
                 buttons.append((btn_text, btn_url))
                 continue
         # Detect "Кнопка: TEXT" prefix format (possibly multiple via <br> in one tag)
-        if re.match(r'^кнопка:\s*', text, re.IGNORECASE):
+        if re.match(r'^кнопка:\s*', text_clean, re.IGNORECASE):
             labels = [s.strip() for s in re.split(r'(?i)\s*кнопка:\s*', text) if s.strip()]
             links = tag.find_all('a', href=True)
             for i, lbl in enumerate(labels):
@@ -1663,9 +1687,9 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                          if t.get_text(strip=True) and not _is_reklama(t)]
                 has_inner_btn = bool(inner and any(
-                    _BTN_BRACKET_RE.match(t.get_text(strip=True)) for t in inner))
+                    _BTN_BRACKET_RE.match(_strip_trailing_footnotes(t.get_text(strip=True))) for t in inner))
                 has_inner_text = bool(inner and any(
-                    not _BTN_BRACKET_RE.match(t.get_text(strip=True)) for t in inner))
+                    not _BTN_BRACKET_RE.match(_strip_trailing_footnotes(t.get_text(strip=True))) for t in inner))
 
                 if has_inner_btn and pending_tags and not has_inner_text:
                     # Table has ONLY buttons (no body text of its own) —
@@ -1766,7 +1790,13 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             if raw_txt:
                 pending_tags.append(el)
             else:
-                flush_pending()
+                # Empty paragraph: check if it contains an image (Google Docs exports
+                # images as <p><img src="..."/></p> with no text content)
+                img_tag = el.find('img')
+                if img_tag and img_tag.get('src', '').startswith('http'):
+                    pending_tags.append(el)
+                else:
+                    flush_pending()
         elif el.name == 'div':
             for sub in el.children:
                 process_element(sub)
@@ -2235,18 +2265,41 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
     return output
 
 def _pick_tg_src(ch_info, tg_variants_list, tg_section_html, email_section_html, email_variants=None):
-    """Return the correct TG HTML source for a channel based on tg_variant_index."""
+    """Return the correct TG HTML source for a channel based on tg_variant_index.
+
+    Priority:
+    1. TG variants list (keyword-parsed or AI-built): pick by index.
+       If index exceeds available variants AND email_variants has a matching slot
+       (e.g. tg_voronki wants index=1 but only one TG variant exists, while
+        email_variants[1] is the "другие источники" email) — use email_variants[1].
+    2. Single TG section: use it for all TG channels.
+    3. No TG section at all: TG-GC channels (index=0) get email_gc text;
+       voronki/bots channels (index>0) get the matching email variant if present.
+    """
     variant_idx = ch_info.get('tg_variant_index')
-    if variant_idx is not None and tg_variants_list and isinstance(tg_variants_list, list):
-        if variant_idx < len(tg_variants_list):
+
+    # --- Path 1: TG variants available ---
+    if tg_variants_list and isinstance(tg_variants_list, list):
+        if variant_idx is not None and variant_idx < len(tg_variants_list):
             return tg_variants_list[variant_idx]['html']
+        # Requested index not present in TG variants.
+        # For variant_idx > 0 (voronki/bots), try matching email variant first —
+        # this handles the common pattern where "другие источники" email section
+        # also serves as the TG-voronki text when no separate TG-voronki section exists.
+        if variant_idx and email_variants and isinstance(email_variants, list) and variant_idx < len(email_variants):
+            return email_variants[variant_idx]['html']
+        # Otherwise fall back to last available TG variant
         return tg_variants_list[-1]['html']
-    # No TG variants: use dedicated TG section if present
+
+    # --- Path 2: No TG variants, but a TG section exists ---
     if tg_section_html:
         return tg_section_html
-    # Fall back to matching email variant by index so Voronki/bots get email_unisender content
-    if email_variants and isinstance(email_variants, list) and variant_idx and variant_idx < len(email_variants):
+
+    # --- Path 3: No TG section at all — fall back to email content ---
+    # For variant_idx > 0 (voronki/bots): use matching email variant (e.g. Unisender/other sources)
+    if variant_idx and email_variants and isinstance(email_variants, list) and variant_idx < len(email_variants):
         return email_variants[variant_idx]['html']
+    # For variant_idx == 0 (TG-GC) or no variants: use main email section
     return email_section_html
 
 
