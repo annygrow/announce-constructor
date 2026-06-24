@@ -57,6 +57,15 @@ def _upload_image_to_yc(data_uri: str):
             region_name=region,
         )
 
+        # Skip upload if identical file already exists
+        try:
+            s3.head_object(Bucket=bucket, Key=filename)
+            public_url = f'{storage_url}/{bucket}/{filename}'
+            logging.debug(f'[YC Upload] Already exists, reusing → {public_url}')
+            return public_url
+        except Exception:
+            pass
+
         s3.put_object(
             Bucket=bucket,
             Key=filename,
@@ -1333,26 +1342,41 @@ def _strip_first_name(text):
     """Remove {first_name} GC variable with smart punctuation/capitalization cleanup.
 
     Handles patterns like:
-      'Привет, {first_name}!'  → 'Привет!'
-      '{first_name}, привет!'  → 'Привет!'
-      '{first_name}! Текст'    → 'Текст'
-      'Привет {first_name}!'   → 'Привет!'
+      'Привет, {first_name}!'       → 'Привет!'
+      '{first_name}, привет!'       → 'Привет!'
+      '{first_name}! Текст'         → 'Текст'
+      'Привет {first_name}!'        → 'Привет!'
+      '<b>{first_name}, текст</b>'  → '<b>Текст</b>'
     """
-    # Google Docs uses \xa0 (non-breaking space) as separator — normalize first
-    # so regex \s patterns can match around the variable.
     text = text.replace('\xa0', ' ')
 
     def _cap(s):
         s = s.strip()
-        return s[0].upper() + s[1:] if s else s
+        if not s:
+            return s
+        # Skip leading HTML tags to find and capitalize the first actual letter
+        return re.sub(
+            r'^((?:<[^>]+>)*\s*)([а-яёa-z])',
+            lambda m: m.group(1) + m.group(2).upper(),
+            s,
+            flags=re.UNICODE
+        )
 
-    # {first_name} at start + optional separator → remove and capitalize what follows
-    text, n = re.subn(r'^\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*', '', text)
+    # {first_name} right after opening tag(s) at start: <b>{first_name}, текст → <b>Текст
+    text, n = re.subn(
+        r'^((?:\s*<(?:b|i|em|strong|span|u|s)[^>]*>)+)\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*',
+        r'\1', text
+    )
     if n:
         text = _cap(text)
 
+    # {first_name} at bare start + optional separator → remove and capitalize what follows
+    if not n:
+        text, n = re.subn(r'^\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*', '', text)
+        if n:
+            text = _cap(text)
+
     # ", {first_name}" in the middle → remove comma + variable, preserve following punctuation
-    # e.g. "Привет, {first_name}. Я Павел" → "Привет. Я Павел"
     text = re.sub(r'\s*,\s*' + _FIRST_NAME_VAR, '', text)
     # " {first_name}," — space before variable, optional separator after
     text = re.sub(r'\s+' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?', ' ', text)
@@ -1360,7 +1384,8 @@ def _strip_first_name(text):
     # Any remaining bare occurrence
     text = re.sub(_FIRST_NAME_VAR, '', text)
 
-    # Clean up leftover leading punctuation or extra spaces
+    # Clean up leftover leading punctuation (including after opening tag: <b>, текст → <b>текст)
+    text = re.sub(r'^((?:<[^>]+>)+)\s*[,!?.;:\-–—]\s*', r'\1', text)
     text = re.sub(r'^[,\s]+', '', text)
     text = re.sub(r'\s{2,}', ' ', text)
 
@@ -1399,8 +1424,13 @@ def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18,
             r'^(\s*<(?:b|i|em|strong|span|u|s)[^>]*>[,!?.;:\s]*</(?:b|i|em|strong|span|u|s)>)+\s*',
             '', inner
         )
-        if inner and inner[0].isalpha() and not inner[0].isupper():
-            inner = inner[0].upper() + inner[1:]
+        # Capitalize first visible letter, skipping any leading HTML tags
+        inner = re.sub(
+            r'^((?:\s*<[^>]+>)*\s*)([а-яёa-z])',
+            lambda m: m.group(1) + m.group(2).upper(),
+            inner,
+            flags=re.UNICODE
+        )
     if CHANNELS.get(channel_key, {}).get('rename_first_name'):
         inner = inner.replace('{first_name}', '{firstName}')
     if not inner:
@@ -2949,10 +2979,112 @@ def api_generate_utm():
 
 GC_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gc_output')
 
+# Bot field per GC transport (found via JS dump of select options)
+_BOT_FIELD = {
+    'ticket': 'ParamsObject[telegram_bot_id]',
+    'max':    'ParamsObject[max_bot_id]',
+}
+
+def _gc_login_session():
+    """Return (authenticated requests.Session, gc_url) or (None, None).
+    Uses the real AJAX login flow that GC's JS uses."""
+    gc_url = os.getenv('GC_ACCOUNT_URL', '').rstrip('/')
+    login  = os.getenv('GC_LOGIN', '')
+    passwd = os.getenv('GC_PASSWORD', '')
+    if not gc_url or not login or not passwd:
+        return None, None
+    s = requests.Session()
+    s.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    try:
+        # Step 1: GET login page to obtain requestTime/requestSimpleSign (server-injected)
+        resp = s.get(f'{gc_url}/cms/system/login', timeout=15)
+        m1 = re.search(r'window\.requestTime\s*=\s*(\d+)', resp.text)
+        m2 = re.search(r'window\.requestSimpleSign\s*=\s*["\']([0-9a-f]+)["\']', resp.text)
+        if not m1 or not m2:
+            logging.warning('[GC Login] requestTime/requestSimpleSign not found in page')
+            return None, None
+        # Step 2: AJAX POST — same format that GC's user-form JS sends
+        post_data = {
+            'action': 'processXdget',
+            'xdgetId': 'r2039_1_1_1_1',
+            'params[action]': 'login',
+            'params[url]': f'{gc_url}/cms/system/login',
+            'params[email]': login,
+            'params[password]': passwd,
+            'params[object_type]': 'cms_page',
+            'params[object_id]': '-1',
+            'params[globalConfirmCheckbox]': '1',
+            'requestTime': m1.group(1),
+            'requestSimpleSign': m2.group(1),
+            'gcSession': '{"id":null,"last_activity":null,"user_id":null,"utm_id":null}',
+            'gcVisit': '',
+            'gcVisitor': '',
+        }
+        resp2 = s.post(
+            f'{gc_url}/cms/system/login',
+            data=post_data,
+            headers={
+                'X-Requested-With': 'XMLHttpRequest',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Referer': f'{gc_url}/cms/system/login',
+            },
+            timeout=15,
+        )
+        result = resp2.json()
+        if result.get('success'):
+            logging.info(f'[GC Login] OK user_id={result.get("user_id")}')
+            return s, gc_url
+        logging.warning(f'[GC Login] Login failed: {result}')
+    except Exception as e:
+        logging.warning(f'[GC Login] {e}')
+    return None, None
+
+def _gc_fix_bot(mailing_id, transport):
+    """Set bot to 'Любой бот' (id=0) on a TG or MAX GC mailing draft.
+    Reads the full mailing form, flips only the bot select, then saves."""
+    bot_field = _BOT_FIELD.get(transport)
+    if not bot_field:
+        return
+    s, gc_url = _gc_login_session()
+    if not s:
+        logging.warning('[GC Bot Fix] GC login failed')
+        return
+    url = f'{gc_url}/notifications/control/mailings/update/id/{mailing_id}/part/main'
+    try:
+        page_resp = s.get(url, timeout=15)
+        soup = BeautifulSoup(page_resp.text, 'html.parser')
+        form = soup.find('form', id='yw0')
+        if not form:
+            logging.warning(f'[GC Bot Fix] form#yw0 not found for mailing {mailing_id}')
+            return
+        # Collect all form field values
+        post_data = {}
+        for inp in form.find_all(['input', 'textarea', 'select']):
+            name = inp.get('name')
+            if not name:
+                continue
+            if inp.name == 'select':
+                selected = inp.find('option', selected=True)
+                post_data[name] = selected['value'] if selected else (inp.find('option') or {}).get('value', '')
+            elif inp.name == 'textarea':
+                post_data[name] = inp.get_text()
+            else:
+                itype = inp.get('type', 'text').lower()
+                if itype in ('checkbox', 'radio') and not inp.get('checked'):
+                    continue
+                post_data[name] = inp.get('value', '')
+        # Override bot to "Любой бот"
+        post_data[bot_field] = '0'
+        post_data['save'] = '1'
+        resp = s.post(url, data=post_data, timeout=20, allow_redirects=True)
+        logging.info(f'[GC Bot Fix] mailing={mailing_id} field={bot_field} status={resp.status_code}')
+    except Exception as e:
+        logging.warning(f'[GC Bot Fix] {e}')
+
 _GC_TRANSPORT = {
     'email':           'email',
     'email_unisender': 'email',
-    'tg_gc':           'tg',
+    'tg_gc':           'ticket',
     'max':             'max',
 }
 
@@ -3044,13 +3176,21 @@ def api_push_to_mail():
         resp.raise_for_status()
         result = resp.json()
         job_id = result.get('job_id')
+        if job_id and transport in _BOT_FIELD:
+            _pending_bot_fix[job_id] = transport
         return jsonify({'ok': True, 'job_id': job_id, 'count': result.get('count', 1)})
     except requests.RequestException as e:
         return jsonify({'error': str(e)}), 500
 
 
+# job_id → transport, for bot-fix after job completes
+_pending_bot_fix: dict = {}
+_bot_fixed: set = set()  # job_ids already fixed
+
+
 @app.route('/api/job-status/<job_id>')
 def api_job_status(job_id):
+    import threading
     mail_url = os.getenv('MAIL_API_URL', 'https://mail.zerocoder.info')
     mail_token = os.getenv('MAIL_API_TOKEN', '')
     gc_domain = os.getenv('GC_DOMAIN', 'university.zerocoder.ru')
@@ -3061,10 +3201,18 @@ def api_job_status(job_id):
         logging.info(f"job-status {job_id}: {job_data}")
         results = job_data.get('results', [])
         gc_url = None
+        mailing_id = None
         if results:
             mailing_id = results[0].get('id') or results[0].get('mailing_id')
             if mailing_id:
                 gc_url = f'https://{gc_domain}/notifications/control/mailings/update/id/{mailing_id}'
+
+        # Fix bot once when job is complete and mailing_id is known
+        transport = _pending_bot_fix.get(job_id)
+        if transport and mailing_id and job_id not in _bot_fixed:
+            _bot_fixed.add(job_id)
+            threading.Thread(target=_gc_fix_bot, args=(mailing_id, transport), daemon=True).start()
+
         return jsonify({
             'status': job_data.get('status'),
             'gc_url': gc_url,
