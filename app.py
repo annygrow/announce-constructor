@@ -993,9 +993,10 @@ def parse_doc_html(html_content):
     subject = ''
     preview = ''
     sender = ''
+    doc_campaign_found = ''  # captured from "Кампания: slug" meta line (skipped tag)
 
     def process_block(tag):
-        nonlocal current_section, subject, preview, sender
+        nonlocal current_section, subject, preview, sender, doc_campaign_found
         section_type = is_section_header(tag)
 
         if section_type == 'skip':
@@ -1008,6 +1009,14 @@ def parse_doc_html(html_content):
                     if 'зерокодер' not in val.lower():
                         val = val + ' из Зерокодера'
                     sender = val
+            # Capture campaign slug from "Кампания: slug" meta line (before discarding)
+            if not doc_campaign_found:
+                raw_text = get_text_content(tag).strip()
+                m = re.match(r'^кампания\s*[:\s]\s*(.*)', raw_text, re.IGNORECASE)
+                if m:
+                    val = re.sub(r'^[-•]\s*', '', m.group(1).strip()).strip()
+                    if val:
+                        doc_campaign_found = val
             return
 
         if section_type == 'email_section':
@@ -1227,7 +1236,7 @@ def parse_doc_html(html_content):
             return f'{dm.group(1)}.{y}'
         return raw
 
-    doc_campaign = ''
+    doc_campaign = doc_campaign_found  # from "Кампания: slug" planning label (captured during skip)
     doc_date = ''
 
     # Gather all list items and paragraphs from sections['other']
@@ -1262,8 +1271,20 @@ def parse_doc_html(html_content):
                 continue
             if re.match(r'^\d{1,2}\s*\.\s*\d{1,2}', item) and not doc_date:
                 doc_date = _norm_date(item)
-            elif not doc_campaign and re.match(r'^[a-zA-Zа-яА-ЯёЁ][a-zA-Zа-яА-ЯёЁ0-9\-_]*$', item):
+            elif not doc_campaign and re.match(r'^[a-zA-Zа-яА-ЯёЁ][a-zA-Zа-яА-ЯёЁ0-9\-_.]*$', item):
                 doc_campaign = item
+
+    # Pass 2b: date not found in li_items — search p_items (date may be a <p>, not a <li>)
+    if not doc_date:
+        for item in p_items:
+            if not item or re.match(r'^\d{1,2}:\d{2}$', item):
+                continue
+            dm = re.search(r'(?<![.\d])(\d{1,2}\.\d{1,2})(?![.\d])', item)
+            if dm:
+                day_str, mon_str = dm.group(1).split('.')
+                if 1 <= int(day_str) <= 31 and 1 <= int(mon_str) <= 12:
+                    doc_date = _norm_date(dm.group(1))
+                    break
 
     return {
         'email_html': email_html,
@@ -1811,18 +1832,17 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment='')
     for tag in ctags:
         text = tag.get_text(strip=True)
         text_clean = _strip_trailing_footnotes(text)
-        # Detect [BUTTON TEXT] or EMOJI [BUTTON TEXT] hyperlink pattern
+        # Detect [BUTTON TEXT] or EMOJI [BUTTON TEXT] — extract as button even without a link
         m_btn = _BTN_BRACKET_RE.match(text_clean)
         if m_btn:
             link = tag.find('a', href=True)
-            if link:
-                prefix = m_btn.group(1).strip()
-                btn_inner = m_btn.group(2).strip()
-                btn_text = f'{prefix} {btn_inner}'.strip() if prefix else btn_inner
-                raw_url = decode_google_redirect(link.get('href', '#'))
-                btn_url = build_utm_url(raw_url, channel_key, campaign, date, segment)
-                buttons.append((btn_text, btn_url))
-                continue
+            prefix = m_btn.group(1).strip()
+            btn_inner = m_btn.group(2).strip()
+            btn_text = f'{prefix} {btn_inner}'.strip() if prefix else btn_inner
+            raw_url = decode_google_redirect(link.get('href', '#') if link else '#')
+            btn_url = build_utm_url(raw_url, channel_key, campaign, date, segment)
+            buttons.append((btn_text, btn_url))
+            continue
         # Detect "Кнопка: TEXT" prefix format (possibly multiple via <br> in one tag)
         if re.match(r'^кнопка:\s*', text_clean, re.IGNORECASE):
             labels = [s.strip() for s in re.split(r'(?i)\s*кнопка:\s*', text) if s.strip()]
