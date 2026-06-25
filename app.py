@@ -2929,52 +2929,48 @@ def api_assemble_email():
             BTN_A = ("background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
                      "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
                      "font-size:16px;display:inline-block;font-weight:600")
-            btn_rows = ''.join(
-                f'<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
-                f'<a href="{b["url"]}" target="_blank" style="{BTN_A}">{b["text"]}</a>\n'
-                f'</td></tr>\n'
-                for b in buttons
-            )
-            # Optional image row at the top of the CTA block
-            img_row = ''
+            # Build all inner rows as a list — mirrors generate_email_html's inner_rows logic
+            # so first/last padding adjustments apply to the same elements.
+            inner_cta_rows = []
             if img_url_cta:
-                img_row = (
+                inner_cta_rows.append(
                     '<tr><td align="center" bgcolor="#1445ea" style="padding:8px 10px 4px;font-size:0px">\n'
                     f'<img src="{img_url_cta}" alt="" style="display:block;border:0;max-width:100%;border-radius:8px">\n'
-                    '</td></tr>\n'
+                    '</td></tr>'
                 )
             if ph.strip():
                 soup_ph = BeautifulSoup(ph, 'html.parser')
                 paras = soup_ph.find_all(['p', 'ul', 'ol'])
                 paras_html = [str(p) for p in paras if str(p).strip()] if paras else [ph]
-                para_rows = [
-                    '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
-                    + p_html + '\n</td></tr>'
-                    for p_html in paras_html
-                ]
-                if para_rows:
-                    para_rows[0] = para_rows[0].replace(
-                        'style="padding:4px 15px"', 'style="padding:14px 15px 4px"', 1)
-                    para_rows[-1] = para_rows[-1].replace(
-                        'style="padding:4px 15px"', 'style="padding:4px 15px 14px"', 1)
-                row = (
-                    '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
-                    '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
-                    'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
-                    + img_row
-                    + '\n'.join(para_rows) + '\n'
-                    + btn_rows
-                    + '</table></td></tr>'
+                for p_html in paras_html:
+                    inner_cta_rows.append(
+                        '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
+                        + p_html + '\n</td></tr>'
+                    )
+            for b in buttons:
+                inner_cta_rows.append(
+                    f'<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
+                    f'<a href="{b["url"]}" target="_blank" style="{BTN_A}">{b["text"]}</a>\n'
+                    f'</td></tr>'
                 )
-            else:
-                row = (
-                    '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
-                    '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
-                    'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
-                    + img_row
-                    + btn_rows
-                    + '</table></td></tr>'
+            if inner_cta_rows:
+                inner_cta_rows[0] = (
+                    inner_cta_rows[0]
+                    .replace('style="padding:4px 15px"', 'style="padding:14px 15px 4px"', 1)
+                    .replace('style="padding:8px 0 12px;margin:0"', 'style="padding:14px 0 12px;margin:0"', 1)
                 )
+                inner_cta_rows[-1] = (
+                    inner_cta_rows[-1]
+                    .replace('style="padding:4px 15px"', 'style="padding:4px 15px 14px"', 1)
+                    .replace('style="padding:8px 0 12px;margin:0"', 'style="padding:8px 0 18px;margin:0"', 1)
+                )
+            row = (
+                '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+                '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
+                'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
+                + '\n'.join(inner_cta_rows) + '\n'
+                + '</table></td></tr>'
+            )
         elif btype == 'block_grey':
             row = block_grey(ph)
         elif btype == 'block_dotted':
