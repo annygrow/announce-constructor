@@ -824,7 +824,11 @@ function saveBlockEdit(channelKey, idx) {
     const btnTf = area.querySelector('.btn-text-field');
     const btnUf = area.querySelector('.btn-url-field');
     if (btnTf) { block.btn_text = btnTf.value; block.preview_text = btnTf.value.substring(0, 50); }
-    if (btnUf) block.btn_url_utm = btnUf.value;
+    if (btnUf) {
+      block.btn_url_utm = btnUf.value;
+      // Sync buttons array so api_assemble_email uses the updated URL
+      block.buttons = [{ text: block.btn_text || '', url: btnUf.value }];
+    }
   }
 
   // Update just the preview text in-place — no full DOM rebuild, no scroll jump

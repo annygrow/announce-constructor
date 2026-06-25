@@ -988,6 +988,7 @@ def parse_doc_html(html_content):
     }
     email_subsections = []  # list of {'name': str, 'blocks': []}
     tg_subsections = []     # list of {'name': str, 'blocks': []}
+    include_texts = []      # texts from "Включаем:" meta lines (for segment detection)
 
     current_section = 'other'
     subject = ''
@@ -1000,9 +1001,9 @@ def parse_doc_html(html_content):
         section_type = is_section_header(tag)
 
         if section_type == 'skip':
+            raw_text = get_text_content(tag).strip()
             # Capture sender name from "от кого: ..." meta line before discarding
             if not sender:
-                raw_text = get_text_content(tag).strip()
                 m = re.match(r'^от\s+кого\s*[:\s]\s*(.+)', raw_text, re.IGNORECASE)
                 if m:
                     val = m.group(1).strip()
@@ -1011,12 +1012,14 @@ def parse_doc_html(html_content):
                     sender = val
             # Capture campaign slug from "Кампания: slug" meta line (before discarding)
             if not doc_campaign_found:
-                raw_text = get_text_content(tag).strip()
                 m = re.match(r'^кампания\s*[:\s]\s*(.*)', raw_text, re.IGNORECASE)
                 if m:
                     val = re.sub(r'^[-•]\s*', '', m.group(1).strip()).strip()
                     if val:
                         doc_campaign_found = val
+            # Capture "Включаем:" text for segment detection (e.g. "Включаем: нейро")
+            if raw_text.lower().startswith('включаем'):
+                include_texts.append(raw_text)
             return
 
         if section_type == 'email_section':
@@ -1212,11 +1215,14 @@ def parse_doc_html(html_content):
     elif not tg_html:
         tg_html = email_html
 
-    # Auto-detect segment from planning metadata (the non-email/non-TG part of the document)
+    # Auto-detect segment from planning metadata (the non-email/non-TG part of the document).
+    # Also include "Включаем: ..." meta lines — they're tagged 'skip' and never reach sections['other'],
+    # but they contain the primary segment signal (e.g. "Включаем: нейро").
     other_text = ' '.join(t.get_text(strip=True) for t in sections['other']).lower()
-    if re.search(r'\bнейро\b', other_text):
+    all_seg_text = other_text + ' ' + ' '.join(include_texts).lower()
+    if re.search(r'\bнейро\b', all_seg_text):
         segment = 'ai'
-    elif re.search(r'\b(техно|технари|тех[/ ]бизнес)\b', other_text):
+    elif re.search(r'\b(техно|технари|тех[/ ]бизнес)\b', all_seg_text):
         segment = 'dev'
     else:
         segment = ''
