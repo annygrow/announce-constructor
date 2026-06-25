@@ -1970,10 +1970,12 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 yc_url = _upload_image_to_yc(l_src)
                 if yc_url:
                     l_src = yc_url
+                    uploaded_urls.append(yc_url)
             if r_src.startswith('data:image'):
                 yc_url = _upload_image_to_yc(r_src)
                 if yc_url:
                     r_src = yc_url
+                    uploaded_urls.append(yc_url)
 
             row = None
             meta = None
