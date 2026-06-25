@@ -1427,6 +1427,8 @@ def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18,
     # Strip leading/trailing <br> tags — Google Docs artifacts at paragraph boundaries
     inner = re.sub(r"^(\s*<br\s*/?>\s*)+", "", inner)
     inner = re.sub(r"(\s*<br\s*/?>\s*)+$", "", inner)
+    # Strip <br> that appears right after opening inline tag(s): <i><br/>text → <i>text
+    inner = re.sub(r"^((?:\s*<(?:b|i|em|strong|span|u|s|a)[^>]*>\s*)+)<br\s*/?>", r"\1", inner)
     inner = inner.strip()
     # Treat &nbsp;-only and <br>-only paragraphs (Google Docs empty lines) as empty
     if not inner or inner.replace('\xa0', '').replace('&nbsp;', '').replace('<br>', '').replace('<br/>', '').strip() == '':
@@ -2480,6 +2482,8 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
     # Strip leading spacers before first real paragraph
     output = re.sub(r'^(\s*<p>&nbsp;</p>\s*)+', '', output)
 
+    # Strip trailing spacers — legal notice adds its own leading spacer
+    output = re.sub(r'(\s*<p>&nbsp;</p>\s*)+$', '', output)
     # Legal notice
     output += '\n<p>&nbsp;</p>\n<p>РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>\n<p>ИНН 9715401631</p>'
     return output
