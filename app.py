@@ -2796,6 +2796,7 @@ def api_parse():
         'preview': parsed['preview'],
         'links': parsed['links'][:50],
         'footnotes': parsed['footnotes'],
+        'segment': parsed.get('segment', ''),
         'doc_campaign': parsed.get('doc_campaign', ''),
         'doc_date': parsed.get('doc_date', ''),
         'doc_title': parsed.get('doc_title', ''),
@@ -2943,15 +2944,25 @@ def api_assemble_email():
                     '</td></tr>\n'
                 )
             if ph.strip():
+                soup_ph = BeautifulSoup(ph, 'html.parser')
+                paras = soup_ph.find_all(['p', 'ul', 'ol'])
+                paras_html = [str(p) for p in paras if str(p).strip()] if paras else [ph]
+                para_rows = [
+                    '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
+                    + p_html + '\n</td></tr>'
+                    for p_html in paras_html
+                ]
+                if para_rows:
+                    para_rows[0] = para_rows[0].replace(
+                        'style="padding:4px 15px"', 'style="padding:14px 15px 4px"', 1)
+                    para_rows[-1] = para_rows[-1].replace(
+                        'style="padding:4px 15px"', 'style="padding:4px 15px 14px"', 1)
                 row = (
                     '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
                     '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
                     'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
                     + img_row
-                    + '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px 5px;margin:0;'
-                    'font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;'
-                    'line-height:27px;color:#ffffff">\n'
-                    + ph + '\n</td></tr>\n'
+                    + '\n'.join(para_rows) + '\n'
                     + btn_rows
                     + '</table></td></tr>'
                 )
