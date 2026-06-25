@@ -1964,6 +1964,14 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             r_img = two_col_cells[1].find('img')
             l_src = l_img.get('src', '') if l_img else ''
             r_src = r_img.get('src', '') if r_img else ''
+            if l_src.startswith('data:image'):
+                yc_url = _upload_image_to_yc(l_src)
+                if yc_url:
+                    l_src = yc_url
+            if r_src.startswith('data:image'):
+                yc_url = _upload_image_to_yc(r_src)
+                if yc_url:
+                    r_src = yc_url
 
             row = None
             meta = None
