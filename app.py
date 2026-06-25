@@ -1732,12 +1732,20 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
         )
 
         # Meta: collect text content for editing (buttons stored separately)
+        # Also track how many rendered paragraphs appear before the first button,
+        # so api_assemble_email can restore the original paragraph/button order.
         text_parts = []
+        btn_position = 0
+        _first_btn_found = False
         for item in items:
             if item['kind'] == 'tag':
                 ph = tag_to_email_p(item['tag'], channel_key, campaign, date, color='#ffffff', link_color='#e1fb52', segment=segment)
                 if ph:
                     text_parts.append(ph)
+                    if not _first_btn_found:
+                        btn_position += 1
+            elif item['kind'] == 'btn':
+                _first_btn_found = True
         paragraphs_html = strip_trailing_empty_paragraphs('\n'.join(text_parts))
 
         first_btn = next((i for i in items if i['kind'] == 'btn'), None)
@@ -1761,6 +1769,7 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
             'btn_text': btn_text_meta,
             'btn_url_utm': btn_url_meta,
             'buttons': all_btns_meta,
+            'btn_position': btn_position,
             'image_url': img_url_meta,
             'preview_text': preview_text,
         }
@@ -2938,21 +2947,41 @@ def api_assemble_email():
                     f'<img src="{img_url_cta}" alt="" style="display:block;border:0;max-width:100%;border-radius:8px">\n'
                     '</td></tr>'
                 )
+            btn_position = block.get('btn_position')
             if ph.strip():
                 soup_ph = BeautifulSoup(ph, 'html.parser')
                 paras = soup_ph.find_all(['p', 'ul', 'ol'])
                 paras_html = [str(p) for p in paras if str(p).strip()] if paras else [ph]
-                for p_html in paras_html:
+                # Split paragraphs around button position to restore original order
+                if btn_position is not None:
+                    pre_btn = paras_html[:btn_position]
+                    post_btn = paras_html[btn_position:]
+                else:
+                    pre_btn = paras_html
+                    post_btn = []
+                for p_html in pre_btn:
                     inner_cta_rows.append(
                         '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
                         + p_html + '\n</td></tr>'
                     )
-            for b in buttons:
-                inner_cta_rows.append(
-                    f'<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
-                    f'<a href="{b["url"]}" target="_blank" style="{BTN_A}">{b["text"]}</a>\n'
-                    f'</td></tr>'
-                )
+                for b in buttons:
+                    inner_cta_rows.append(
+                        f'<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
+                        f'<a href="{b["url"]}" target="_blank" style="{BTN_A}">{b["text"]}</a>\n'
+                        f'</td></tr>'
+                    )
+                for p_html in post_btn:
+                    inner_cta_rows.append(
+                        '<tr><td align="left" bgcolor="#1445ea" style="padding:4px 15px">\n'
+                        + p_html + '\n</td></tr>'
+                    )
+            else:
+                for b in buttons:
+                    inner_cta_rows.append(
+                        f'<tr><td align="center" bgcolor="#1445ea" style="padding:8px 0 12px;margin:0">\n'
+                        f'<a href="{b["url"]}" target="_blank" style="{BTN_A}">{b["text"]}</a>\n'
+                        f'</td></tr>'
+                    )
             if inner_cta_rows:
                 inner_cta_rows[0] = (
                     inner_cta_rows[0]
