@@ -2215,7 +2215,7 @@ def clean_tag_for_tg(tag, _in_bold=False):
                 parts.append(inner)
     return ''.join(parts)
 
-_REKLAMA_RE        = re.compile(r'реклама\s+ооо', re.IGNORECASE)
+_REKLAMA_RE        = re.compile(r'реклама[\s.,]*ооо', re.IGNORECASE)
 _SINGLE_PUNCT_BOLD = re.compile(r'\*\*([!?.,;:])\*\*')
 _ANY_BOLD_RE       = re.compile(r'\*\*([^*\n]+?)\*\*')
 # Detect emoji immediately before a ** bold marker (Neurocat can't render bold after emoji)
@@ -2350,6 +2350,11 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
             # e.g. "Привет, **{first_name}**. Я Павел" → "Привет. Я Павел"
             inner = re.sub(r'\s*,\s*\*\*\{first_name\}\*\*', '', inner)
             # "**{first_name}[punct] " — variable at start of bold block
+            # If followed by lowercase letter, remove and capitalize it
+            inner = re.sub(
+                r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*\*\*\s*([а-яёa-z])',
+                lambda m: m.group(1).upper(), inner
+            )
             inner = re.sub(r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*', '**', inner)
             inner = _strip_first_name(inner)
             inner = re.sub(r'\*{4,}', '', inner).strip()  # clean up empty **..** remnants
@@ -2379,6 +2384,11 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
         for para in paragraphs:
             para = re.sub(r'\{\s*first_name\s*\}', '{first_name}', para)
             para = re.sub(r'\s*,\s*\*\*\{first_name\}\*\*', '', para)
+            # **{first_name},** prefix followed by text: remove and capitalize next word
+            para = re.sub(
+                r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*\*\*\s*([а-яёa-z])',
+                lambda m: m.group(1).upper(), para
+            )
             para = re.sub(r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*', '**', para)
             para = _strip_first_name(para).strip()
             para = re.sub(r'\*{4,}', '', para).strip()
