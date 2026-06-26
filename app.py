@@ -223,6 +223,12 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 7. НЕ включай заголовки секций в контент.
 8. Кнопки [ТЕКСТ КНОПКИ] — сохранять как есть, они обрабатываются отдельно.
 
+=== ПОЛЕ section_headers ===
+
+В поле section_headers верни ТОЧНЫЙ текст строки-заголовка каждой найденной секции — так, как он написан в документе (включая любой дополнительный текст на той же строке через мягкий перенос, если он слит с заголовком).
+Например: если секция "Другие источники" начинается строкой "Другие источникиТема: Завтра..." — верни именно эту строку целиком.
+Если секция не найдена — null.
+
 === ФОРМАТ ОТВЕТА ===
 
 Возвращай ТОЛЬКО валидный JSON, без markdown-обёртки (без ```json, без пояснений).
@@ -235,7 +241,13 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
   "email_unisender": "текст второго email-варианта или null",
   "tg_main": "текст основного TG-варианта или null",
   "tg_voronki": "TG-текст для воронок (короткий, без email-контента) или null",
-  "neurocat": "текст для Нейрокота или null"
+  "neurocat": "текст для Нейрокота или null",
+  "section_headers": {
+    "email_gc": "точный текст строки-заголовка секции email_gc как в документе или null",
+    "email_unisender": "точный текст строки-заголовка секции email_unisender как в документе или null",
+    "tg_main": "точный текст строки-заголовка секции tg_main как в документе или null",
+    "tg_voronki": "точный текст строки-заголовка секции tg_voronki как в документе или null"
+  }
 }"""
 
 
@@ -642,7 +654,7 @@ def get_text_content(tag):
     """Get plain text from a BS4 tag, collapsing whitespace."""
     return ' '.join(tag.get_text(' ', strip=True).split())
 
-def is_section_header(tag):
+def is_section_header(tag, ai_hints=None):
     """
     Returns the section key if this tag is a section divider, else None.
     Matches any short <p>, <li>, or heading that contains section keywords —
@@ -660,6 +672,20 @@ def is_section_header(tag):
     text = get_text_content(tag).lower().strip()
     if not text:
         return None
+
+    # AI hints take priority over regex — they identified the exact section header text
+    if ai_hints:
+        _ai_type_map = {
+            'email_gc': 'email_section',
+            'email_unisender': 'email_section',
+            'tg_main': 'tg_section',
+            'tg_voronki': 'tg_section',
+            'neurocat': 'tg_section',
+        }
+        for ai_field, section_type in _ai_type_map.items():
+            hint_text = (ai_hints.get(ai_field) or '').lower().strip()
+            if hint_text and len(hint_text) > 2 and text.startswith(hint_text[:40]):
+                return section_type
 
     # Early check: merged paragraph where label is the very first word and content follows.
     # Example: "Телеграм🎉Ты уже в самой продвинутой тусовке..."
@@ -737,7 +763,7 @@ def is_section_header(tag):
         return None
 
     for kw in subject_kw:
-        if text.startswith(kw) or kw in text:
+        if text.startswith(kw):
             return 'subject'
     for kw in preview_kw:
         if text.startswith(kw) or kw in text:
@@ -956,7 +982,7 @@ def fix_orphan_sups(body):
             prev.append(sup)
 
 
-def parse_doc_html(html_content):
+def parse_doc_html(html_content, ai_hints=None):
     """
     Parse Google Docs exported HTML and return structured content dict:
     {
@@ -998,7 +1024,7 @@ def parse_doc_html(html_content):
 
     def process_block(tag):
         nonlocal current_section, subject, preview, sender, doc_campaign_found
-        section_type = is_section_header(tag)
+        section_type = is_section_header(tag, ai_hints=ai_hints)
 
         if section_type == 'skip':
             raw_text = get_text_content(tag).strip()
@@ -1107,7 +1133,7 @@ def parse_doc_html(html_content):
             elif name in ('ul', 'ol'):
                 # Peek at direct <li> children for section headers
                 lis = child.find_all('li', recursive=False)
-                if any(is_section_header(li) for li in lis):
+                if any(is_section_header(li, ai_hints=ai_hints) for li in lis):
                     for li in lis:
                         process_block(li)
                 else:
@@ -2478,10 +2504,13 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         if '\n' in inner:
             sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
             for part in sub_parts:
-                # Close any tags split across the \n boundary (e.g. <i> opened before \n)
                 for t in ('i', 'b', 'u', 's'):
-                    if part.count(f'<{t}>') > part.count(f'</{t}>'):
-                        part += f'</{t}>'
+                    open_count = part.count(f'<{t}>')
+                    close_count = part.count(f'</{t}>')
+                    if open_count > close_count:
+                        part += f'</{t}>' * (open_count - close_count)
+                    elif close_count > open_count:
+                        part = f'<{t}>' * (close_count - open_count) + part
                 result_parts.append(f'<p>{part}</p>')
         else:
             result_parts.append(f'<p>{inner}</p>')
@@ -2683,21 +2712,24 @@ def api_parse():
     except requests.RequestException as e:
         return jsonify({'error': f'Ошибка загрузки документа: {str(e)}'}), 502
 
+    # Run AI parser first to get section header hints for the HTML parser
+    ai_result = None
+    ai_error = None
+    ai_section_hints = None
     try:
-        parsed = parse_doc_html(html_content)
+        ai_result = parse_with_ai(html_content)
+        if ai_result and isinstance(ai_result.get('section_headers'), dict):
+            ai_section_hints = ai_result['section_headers']
+    except Exception as e:
+        ai_error = str(e)
+
+    try:
+        parsed = parse_doc_html(html_content, ai_hints=ai_section_hints)
     except Exception as e:
         return jsonify({'error': f'Ошибка разбора документа: {str(e)}'}), 500
 
     if not parsed.get('doc_title') and cd_title:
         parsed['doc_title'] = cd_title
-
-    # Try AI-assisted parsing to enrich / fix sections
-    ai_result = None
-    ai_error = None
-    try:
-        ai_result = parse_with_ai(html_content)
-    except Exception as e:
-        ai_error = str(e)
 
     # Merge AI results into parsed: AI is primary for subject/preview (smarter about typos
     # and free-form text); keyword parser is fallback when AI found nothing.
