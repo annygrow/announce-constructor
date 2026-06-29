@@ -673,14 +673,16 @@ def is_section_header(tag, ai_hints=None):
     if not text:
         return None
 
-    # AI hints take priority over regex — they identified the exact section header text
+    # AI hints take priority over regex — they identified the exact section header text.
+    # TG fields are checked before email fields: if the same header text matches both
+    # (e.g. AI assigns "Сообщение" to both email_unisender and tg_main), TG wins.
     if ai_hints:
         _ai_type_map = {
-            'email_gc': 'email_section',
-            'email_unisender': 'email_section',
             'tg_main': 'tg_section',
             'tg_voronki': 'tg_section',
             'neurocat': 'tg_section',
+            'email_gc': 'email_section',
+            'email_unisender': 'email_section',
         }
         for ai_field, section_type in _ai_type_map.items():
             hint_text = (ai_hints.get(ai_field) or '').lower().strip()
@@ -2777,17 +2779,16 @@ def api_parse():
         tg_voronki_ai = _strip_ai_tg_header(ai_result.get('tg_voronki') or '')
 
         def _looks_like_email(text):
-            """True if the text looks like full email content rather than a short TG message."""
+            """True if the text looks like full email content rather than a TG message.
+            TG messages can legitimately be long (3000+ chars) so length alone is not
+            a reliable signal. Use only markers that are exclusive to email_gc content."""
             if not text:
                 return False
-            # TG messages are short; email content is long
-            if len(text) > 1500:
-                return True
-            # Contains GC offer URL variable — only in email_gc
+            # GC offer URL variable only appears in email_gc, never in TG messages
             if '{offer_url_' in text:
                 return True
-            # Contains a CTA button marker pattern [ТЕКСТ КНОПКИ]
-            if re.search(r'\[[А-ЯA-ZА-яa-z\s]{5,}\]', text):
+            # GC personalization variable only appears in email_gc
+            if '{first_name}' in text:
                 return True
             return False
 
