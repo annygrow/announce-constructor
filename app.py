@@ -910,6 +910,17 @@ def resolve_comment_refs(html_str, cmnt_url_map):
             new_a.string = str(prev)
         elif hasattr(prev, 'name') and prev.name in ('span', 'b', 'strong', 'i', 'em'):
             prev.wrap(soup.new_tag('a', href=url))
+        elif hasattr(prev, 'name') and prev.name in ('p', 'div', 'h1', 'h2', 'h3', 'h4'):
+            # <sup> is a block-level sibling (Google Docs puts it outside <p> in some tables).
+            # Wrap the last significant child span inside the block with <a href>.
+            last_span = None
+            for child in reversed(list(prev.children)):
+                if hasattr(child, 'name') and child.name in ('span', 'b', 'strong', 'i', 'em'):
+                    if child.get_text(strip=True).replace('\xa0', '').strip():
+                        last_span = child
+                        break
+            if last_span:
+                last_span.wrap(soup.new_tag('a', href=url))
 
         sup.decompose()
 
