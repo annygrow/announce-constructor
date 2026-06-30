@@ -2876,10 +2876,12 @@ def api_parse():
         if not parsed['tg_html'] and tg_main_ai:
             parsed['tg_html'] = tg_main_ai
 
-        # Build TG variants only when AI found voronki content and keyword parser didn't
-        # already produce variants. Prefer keyword-parsed tg_html for the main variant
-        # (it has proper <a href> links); AI tg_main is fallback only.
-        if tg_voronki_ai and not parsed.get('tg_variants'):
+        # Build TG variants only when AI found voronki content AND identified a dedicated
+        # section header for it. Without a section header, AI is guessing — it often
+        # mistakes the channels-table metadata (telegram/Воронки GC/@bot...) for voronki
+        # content. Requiring a non-null section_headers.tg_voronki gates on a real section.
+        ai_voronki_header = (ai_result.get('section_headers') or {}).get('tg_voronki')
+        if tg_voronki_ai and ai_voronki_header and not parsed.get('tg_variants'):
             main_tg = parsed.get('tg_html') or tg_main_ai
             # Only create two variants if voronki content meaningfully differs from main
             v_short = re.sub(r'\s+', ' ', tg_voronki_ai).strip()[:300]
