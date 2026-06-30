@@ -179,6 +179,8 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 
 **TG — ОСНОВНОЙ** (поле "tg_main"):
 Секции с заголовком "телеграм", "telegram", "тг", "tg", "max", "телеграм/max", "тг/max" и т.п.
+Также: "ТГ бот (ГК)", "ТГ бот", "ТГ бот ГК", "бот тг", "тг-бот", "для бота тг", "tg bot" и любые похожие варианты.
+‼️ ВАЖНО: заголовок TG-секции может стоять в ОДНОМ АБЗАЦЕ с первой строкой контента (слитый параграф). Пример: "ТГ бот (ГК)Соберем видео-завод в прямом эфире..." — здесь "ТГ бот (ГК)" это заголовок секции, а не начало контента. Распознавай первую часть такого абзаца как заголовок, в section_headers верни его точный текст.
 Это основной текст для ТГ бот ГК и Max. Если такой секции нет — вернуть null (не копировать email_gc).
 
 **TG — ВОРОНКИ** (поле "tg_voronki"):
@@ -199,18 +201,29 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 
 === ТИПИЧНАЯ СТРУКТУРА ДОКУМЕНТА ===
 
+‼️ ВАЖНО: документ может начинаться с нумерованных структурных заголовков вида "1. Тема рассылки", "2. Каналы", "3. Сегмент отправки", "4. Контент письма". Это МЕТАДАННЫЕ документа, НЕ заголовки контентных секций. Ищи заголовки секций ВНУТРИ раздела "Контент письма".
+
 Вариант A (с 1 кликом):
 1. Тема: ...
 2. Превью: ...
 3. [Почта (1 клик)] → email_gc (с {first_name}, для GetCourse)
 4. [Другие источники] → email_unisender (без {first_name}, для Unisender)
    Если внутри "Другие источники" есть короткий TG-блок — это tg_voronki
-5. [ТГ / Telegram / Max] → tg_main
+5. [ТГ / Telegram / Max / ТГ бот (ГК)] → tg_main
 
 Вариант B (без разделения):
 1. Тема: ...
-2. [Почта / Email] → email_gc
-3. [ТГ / Telegram] → tg_main
+2. [Почта / Email / ПОЧТА] → email_gc
+3. [ТГ / Telegram / ТГ бот (ГК)] → tg_main
+
+Вариант C (нумерованный документ):
+[...нумерованные структурные заголовки 1-4...]
+4. Контент письма     ← это мета-заголовок, НЕ секция
+   ПОЧТА              ← это заголовок email_gc секции
+   Тема: ...
+   [email контент]
+   ТГ бот (ГК)        ← это заголовок tg_main секции (может быть слит с контентом)
+   [TG контент]
 
 === ПРАВИЛА ОБРАБОТКИ КОНТЕНТА ===
 
@@ -673,6 +686,11 @@ def is_section_header(tag, ai_hints=None):
     if not text:
         return None
 
+    # "БОТ (1 клик)", "БОТ (общий)" etc. — unambiguous TG section headers.
+    # Must run BEFORE AI hints: AI sometimes misclassifies these as email_unisender.
+    if re.match(r'^бот\s*\(', text) and len(text) <= 40:
+        return 'tg_section'
+
     # AI hints take priority over regex — they identified the exact section header text.
     # TG fields are checked before email fields: if the same header text matches both
     # (e.g. AI assigns "Сообщение" to both email_unisender and tg_main), TG wins.
@@ -686,15 +704,20 @@ def is_section_header(tag, ai_hints=None):
         }
         for ai_field, section_type in _ai_type_map.items():
             hint_text = (ai_hints.get(ai_field) or '').lower().strip()
-            if hint_text and len(hint_text) > 2 and text.startswith(hint_text[:40]):
+            # Reject hints that look like content: section headers are short (≤80 chars)
+            # and never contain GC variables like {first_name}. Long or variable-containing
+            # hints mean the AI returned content text instead of the header label.
+            if (hint_text and len(hint_text) > 2 and len(hint_text) <= 80
+                    and '{' not in hint_text
+                    and text.startswith(hint_text[:40])):
                 return section_type
 
     # Early check: merged paragraph where label is the very first word and content follows.
-    # Example: "Телеграм🎉Ты уже в самой продвинутой тусовке..."
+    # Examples: "Телеграм🎉Ты уже в самой продвинутой тусовке...", "ТГ бот (ГК)Соберем..."
     # Must run BEFORE the length guard, since merged paragraphs are long.
     _first_word_raw = text.split()[0] if text.split() else ''
     _first_word_alpha = ''.join(ch for ch in _first_word_raw if ch.isalpha())
-    if _first_word_alpha in {'телеграм', 'telegram'} and text != _first_word_alpha:
+    if _first_word_alpha in {'телеграм', 'telegram', 'тг', 'tg'} and text != _first_word_alpha:
         return 'tg_section'
 
     # Section headers are short labels, not body sentences
@@ -702,7 +725,7 @@ def is_section_header(tag, ai_hints=None):
         return None
 
     # Skip rows that are clearly channel entries or service addresses
-    skip_kw = ['care@', '@zerocoder', 'getcourse', 'unisender', 'bot (', 'бот (',
+    skip_kw = ['care@', '@zerocoder', 'getcourse', 'unisender', 'bot (',
                'zerocoder_bot', 'zerocoder.ru', 'newcat.zerocoder']
     if any(s in text for s in skip_kw):
         return None
@@ -1057,6 +1080,12 @@ def parse_doc_html(html_content, ai_hints=None):
             email_subsections.append({'name': name[:50], 'blocks': []})
             current_section = 'email_section'
             return
+        if section_type == 'tg_section' and tag.name == 'li':
+            # Suppress premature TG detection from document outline/config lists.
+            # Outline items are always <li> elements; real section headers are <p> or headings.
+            has_email_content = any(sub['blocks'] for sub in email_subsections)
+            if not has_email_content:
+                section_type = None
         if section_type == 'tg_section':
             full_text = get_text_content(tag).strip()
             tg_subsections.append({'name': full_text[:50], 'blocks': []})
@@ -1076,10 +1105,16 @@ def parse_doc_html(html_content, ai_hints=None):
                 tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
                 if tag_copy:
                     for span in list(tag_copy.find_all('span')):
-                        span_text_alpha = ''.join(
-                            ch for ch in get_text_content(span).strip() if ch.isalpha()
-                        ).lower()
+                        span_text = get_text_content(span).strip()
+                        span_text_alpha = ''.join(ch for ch in span_text if ch.isalpha()).lower()
+                        # Exact match: "Телеграм", "Telegram", "Max"
                         if span_text_alpha == first_word_alpha:
+                            span.decompose()
+                            break
+                        # Short multi-word label starting with тг/tg: "ТГ бот (ГК)", "TG Bot"
+                        if (first_word_alpha in ('тг', 'tg') and
+                                span_text_alpha.startswith(first_word_alpha) and
+                                len(span_text) <= 40):
                             span.decompose()
                             break
                     # Remove empty wrapper tags left after span removal (e.g. <b></b>)
@@ -2591,7 +2626,21 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
 
-        result_parts.append(inner)
+        # Split soft-return (<br>) lines into separate entries and rebalance tags,
+        # so that trailing <br> inside a bold span never leaves </b> on its own line.
+        if '\n' in inner:
+            sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
+            for part in sub_parts:
+                for t in ('i', 'b', 'u', 's'):
+                    open_count = part.count(f'<{t}>')
+                    close_count = part.count(f'</{t}>')
+                    if open_count > close_count:
+                        part += f'</{t}>' * (open_count - close_count)
+                    elif close_count > open_count:
+                        part = f'<{t}>' * (close_count - open_count) + part
+                result_parts.append(part)
+        else:
+            result_parts.append(inner)
 
     output = '\n\n'.join(result_parts)
     output = inject_utm_in_html(output, channel_key, campaign, date, segment=segment)
@@ -2624,13 +2673,8 @@ def _pick_tg_src(ch_info, tg_variants_list, tg_section_html, email_section_html,
     if tg_variants_list and isinstance(tg_variants_list, list):
         if variant_idx is not None and variant_idx < len(tg_variants_list):
             return tg_variants_list[variant_idx]['html']
-        # Requested index not present in TG variants.
-        # For variant_idx > 0 (voronki/bots), try matching email variant first —
-        # this handles the common pattern where "другие источники" email section
-        # also serves as the TG-voronki text when no separate TG-voronki section exists.
-        if variant_idx and email_variants and isinstance(email_variants, list) and variant_idx < len(email_variants):
-            return email_variants[variant_idx]['html']
-        # Otherwise fall back to last available TG variant
+        # Requested index not present — use the last available TG variant.
+        # Never fall back to email_variants here: email content must not appear in TG channels.
         return tg_variants_list[-1]['html']
 
     # --- Path 2: No TG variants, but a TG section exists ---
@@ -2828,6 +2872,7 @@ def api_parse():
     if ai_result:
         logging.debug(f"AI tg_main first 200: {str(ai_result.get('tg_main',''))[:200]}")
         logging.debug(f"AI email_gc first 200: {str(ai_result.get('email_gc',''))[:200]}")
+        logging.debug(f"AI section_headers: {json.dumps(ai_result.get('section_headers') or {}, ensure_ascii=False)}")
 
     response_data = {
         'email_html': parsed['email_html'],
