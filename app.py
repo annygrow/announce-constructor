@@ -690,35 +690,18 @@ def is_section_header(tag, ai_hints=None):
         return None
 
     text = get_text_content(tag).lower().strip()
+    # Normalize soft-return line breaks so "Сообщение\nдля бота ТГ" matches keywords.
+    text = text.replace('\n', ' ')
     if not text:
         return None
 
     # "БОТ (1 клик)", "БОТ (общий)" etc. — unambiguous TG section headers.
-    # Must run BEFORE AI hints: AI sometimes misclassifies these as email_unisender.
     if re.match(r'^бот\s*\(', text) and len(text) <= 40:
         return 'tg_section'
 
-    # AI hints take priority over regex — they identified the exact section header text.
-    # TG fields are checked before email fields: if the same header text matches both
-    # (e.g. AI assigns "Сообщение" to both email_unisender and tg_main), TG wins.
-    if ai_hints:
-        _ai_type_map = {
-            'tg_main': 'tg_section',
-            'tg_voronki': 'tg_section',
-            'neurocat': 'tg_section',
-            'email_gc': 'email_section',
-            'email_unisender': 'email_section',
-        }
-        for ai_field, section_type in _ai_type_map.items():
-            hint_text = (ai_hints.get(ai_field) or '').lower().strip()
-            # Reject hints that look like content: section headers are short labels
-            # (≤30 chars, e.g. "БОТ"=3, "ТГ бот (ГК)"=11, "Сообщение для бота ТГ"=22).
-            # Content lines (TG subject "Выходные, за которые..." = 67 chars) must not
-            # be mistaken for headers — they cause the parser to cut sections incorrectly.
-            if (hint_text and len(hint_text) > 2 and len(hint_text) <= 30
-                    and '{' not in hint_text
-                    and text.startswith(hint_text[:30])):
-                return section_type
+    # AI hints are intentionally NOT used here. ai_hints is accepted as a parameter
+    # for backwards-compatibility but ignored: stochastic AI responses caused intermittent
+    # wrong section splits. All section detection is deterministic via keywords below.
 
     # Early check: merged paragraph where label is the very first word and content follows.
     # Examples: "Телеграм🎉Ты уже в самой продвинутой тусовке...", "ТГ бот (ГК)Соберем..."
