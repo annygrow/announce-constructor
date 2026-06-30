@@ -1477,7 +1477,7 @@ def _strip_first_name(text):
     # Clean up leftover leading punctuation (including after opening tag: <b>, текст → <b>текст)
     text = re.sub(r'^((?:<[^>]+>)+)\s*[,!?.;:\-–—]\s*', r'\1', text)
     text = re.sub(r'^[,\s]+', '', text)
-    text = re.sub(r'\s{2,}', ' ', text)
+    text = re.sub(r'[^\S\n]{2,}', ' ', text)
 
     return text.strip()
 
