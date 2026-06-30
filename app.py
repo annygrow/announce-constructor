@@ -2453,7 +2453,13 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
                 inner
             )
 
-        result_parts.append(inner)
+        # <p> tags with <br>-separated items (custom bullet lists) come in as single
+        # string with \n inside. Split so each item becomes its own paragraph.
+        if '\n' in inner:
+            sub_lines = [line.strip() for line in inner.split('\n') if line.strip()]
+            result_parts.extend(sub_lines)
+        else:
+            result_parts.append(inner)
 
     text = '\n\n'.join(result_parts)
     # Normalize { first_name } (with spaces/newlines from Google Docs multiline export),
