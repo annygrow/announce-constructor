@@ -769,7 +769,7 @@ def is_section_header(tag, ai_hints=None):
         return 'email_section'
 
     # Standalone TG section headers — single-word only, exact match to avoid false positives
-    tg_exact = {'телеграм', 'telegram', 'тг', 'tg', 'max', 'instagram', 'push', 'youtube',
+    tg_exact = {'телеграм', 'telegram', 'тг', 'tg', 'бот', 'max', 'instagram', 'push', 'youtube',
                 'инстаграм', 'ютуб', 'нейрокот', 'помощник'}
     if text in tg_exact:
         return 'tg_section'
