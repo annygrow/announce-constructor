@@ -711,12 +711,13 @@ def is_section_header(tag, ai_hints=None):
         }
         for ai_field, section_type in _ai_type_map.items():
             hint_text = (ai_hints.get(ai_field) or '').lower().strip()
-            # Reject hints that look like content: section headers are short (≤80 chars)
-            # and never contain GC variables like {first_name}. Long or variable-containing
-            # hints mean the AI returned content text instead of the header label.
-            if (hint_text and len(hint_text) > 2 and len(hint_text) <= 80
+            # Reject hints that look like content: section headers are short labels
+            # (≤30 chars, e.g. "БОТ"=3, "ТГ бот (ГК)"=11, "Сообщение для бота ТГ"=22).
+            # Content lines (TG subject "Выходные, за которые..." = 67 chars) must not
+            # be mistaken for headers — they cause the parser to cut sections incorrectly.
+            if (hint_text and len(hint_text) > 2 and len(hint_text) <= 30
                     and '{' not in hint_text
-                    and text.startswith(hint_text[:40])):
+                    and text.startswith(hint_text[:30])):
                 return section_type
 
     # Early check: merged paragraph where label is the very first word and content follows.
