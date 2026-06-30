@@ -280,22 +280,29 @@ def parse_with_ai(raw_html):
     if len(plain_text) > 30000:
         plain_text = plain_text[:30000]
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {'role': 'system', 'content': _AI_SYSTEM_PROMPT},
-            {'role': 'user', 'content': f'Текст документа:\n\n{plain_text}'},
-        ],
-        temperature=0.1,
-        max_tokens=8000,
-    )
+    messages = [
+        {'role': 'system', 'content': _AI_SYSTEM_PROMPT},
+        {'role': 'user', 'content': f'Текст документа:\n\n{plain_text}'},
+    ]
 
-    raw_answer = response.choices[0].message.content.strip()
-    raw_answer = re.sub(r'^```(?:json)?\s*', '', raw_answer)
-    raw_answer = re.sub(r'\s*```$', '', raw_answer)
+    last_err = None
+    for attempt in range(2):
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=8000,
+        )
+        raw_answer = response.choices[0].message.content.strip()
+        raw_answer = re.sub(r'^```(?:json)?\s*', '', raw_answer)
+        raw_answer = re.sub(r'\s*```$', '', raw_answer)
+        try:
+            return json.loads(raw_answer)
+        except json.JSONDecodeError as e:
+            last_err = e
+            logging.warning(f'AI JSON parse error (attempt {attempt+1}): {e}')
 
-    parsed = json.loads(raw_answer)
-    return parsed
+    raise last_err
 
 
 _EMPTY_P_RE = re.compile(
