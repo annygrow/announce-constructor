@@ -2454,10 +2454,11 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
             )
 
         # <p> tags with <br>-separated items (custom bullet lists) come in as single
-        # string with \n inside. Split so each item becomes its own paragraph.
+        # string with \n inside. Keep as ONE block joined with \n so items are
+        # compact (single line-break between them, not a paragraph gap).
         if '\n' in inner:
             sub_lines = [line.strip() for line in inner.split('\n') if line.strip()]
-            result_parts.extend(sub_lines)
+            result_parts.append('\n'.join(sub_lines))
         else:
             result_parts.append(inner)
 
@@ -2542,10 +2543,11 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
 
-        # Split at soft returns (\n in text nodes) — Google Docs Shift+Enter puts multiple
-        # logical paragraphs into one <p>; each becomes a separate TG paragraph.
+        # Split at soft returns (\n from <br> or Shift+Enter) and keep as ONE <p> with <br>
+        # separators — spacers must not appear between list items.
         if '\n' in inner:
             sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
+            balanced = []
             for part in sub_parts:
                 for t in ('i', 'b', 'u', 's'):
                     open_count = part.count(f'<{t}>')
@@ -2554,7 +2556,8 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
                         part += f'</{t}>' * (open_count - close_count)
                     elif close_count > open_count:
                         part = f'<{t}>' * (close_count - open_count) + part
-                result_parts.append(f'<p>{part}</p>')
+                balanced.append(part)
+            result_parts.append(f'<p>{"<br>".join(balanced)}</p>')
         else:
             result_parts.append(f'<p>{inner}</p>')
 
@@ -2632,10 +2635,11 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
 
-        # Split soft-return (<br>) lines into separate entries and rebalance tags,
-        # so that trailing <br> inside a bold span never leaves </b> on its own line.
+        # Split soft-return (<br>) lines and keep as ONE entry joined with \n
+        # so list items stay compact (no blank line between them in the output).
         if '\n' in inner:
             sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
+            balanced = []
             for part in sub_parts:
                 for t in ('i', 'b', 'u', 's'):
                     open_count = part.count(f'<{t}>')
@@ -2644,7 +2648,8 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
                         part += f'</{t}>' * (open_count - close_count)
                     elif close_count > open_count:
                         part = f'<{t}>' * (close_count - open_count) + part
-                result_parts.append(part)
+                balanced.append(part)
+            result_parts.append('\n'.join(balanced))
         else:
             result_parts.append(inner)
 
