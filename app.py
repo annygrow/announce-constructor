@@ -1206,7 +1206,7 @@ def parse_doc_html(html_content, ai_hints=None):
             # Replace non-breaking spaces before checking emptiness —
             # Google Docs often exports empty paragraphs as <p><span>&nbsp;</span></p>
             txt = t.get_text(strip=True).replace('\xa0', '').strip()
-            if txt or t.name in ('ul', 'ol', 'table'):
+            if txt or t.name in ('ul', 'ol', 'table') or t.find('img'):
                 parts.append(str(t))
         return '\n'.join(parts)
 
