@@ -2434,7 +2434,7 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
         inner = _postprocess_md(clean_tag_for_tg_markdown(tag, raw_links).strip())
         if not inner:
             continue
-        inner = re.sub(r'\*{0,2}\s*ссылка:\s*\*{0,2}\s*', '', inner, flags=re.IGNORECASE).strip()
+        inner = re.sub(r'\*{0,2}\s*ссылка:\s*([^\s*\w]*)\s*\*{0,2}\s*', r'\1', inner, flags=re.IGNORECASE).strip()
         if not inner:
             continue
 
