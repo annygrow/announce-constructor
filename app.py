@@ -450,6 +450,16 @@ def block_image_center(image_url):
         '</td></tr>'
     )
 
+def block_image_with_text(image_url, paragraphs_html):
+    return (
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;margin:0;background-color:#ffffff">\n'
+        f'<div style="text-align:center;font-size:0px;padding-bottom:10px">'
+        f'<img src="{image_url}" alt="" style="display:inline-block;border:0;max-width:100%;border-radius:10px">'
+        f'</div>\n'
+        + paragraphs_html
+        + '\n</td></tr>'
+    )
+
 def block_blue_text(paragraphs_html):
     """Blue block without a CTA button."""
     return (
@@ -1854,9 +1864,10 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
         return html, meta
 
     # Non-CTA blocks: render all tag items as paragraphs
-    # Handle standalone image items first (outside CTA context)
+    # Handle image items (outside CTA context) — may be combined with text
     img_items = [i for i in items if i['kind'] == 'img']
-    for img_item in img_items:
+    if img_items:
+        img_item = img_items[0]
         img_src = img_item['src']
         if img_src.startswith('data:image'):
             # Try YC upload first; fall back to user-provided URL if credentials missing.
@@ -1869,13 +1880,38 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                 img_src = images[user_img_idx[0]]
                 user_img_idx[0] += 1
             else:
-                continue  # no URL supplied and no YC — skip
+                img_src = ''
         if img_src.startswith('http'):
-            return block_image_center(img_src), {
-                'type': 'block_image',
+            tag_items = [i for i in items if i['kind'] == 'tag']
+            if not tag_items:
+                return block_image_center(img_src), {
+                    'type': 'block_image',
+                    'image_url': img_src,
+                    'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '',
+                    'preview_text': 'Картинка',
+                }
+            # Image + text: combine into one white block
+            p_parts_img = []
+            for item in tag_items:
+                tag = item['tag']
+                if tag.name in ('ul', 'ol'):
+                    for li in tag.find_all('li'):
+                        inner = elem_inner_html_for_email(li)
+                        inner = inject_utm_in_html(inner, channel_key, campaign, date, segment=segment)
+                        s = ("margin:0 0 6px 0;padding-left:20px;font-family:roboto,'helvetica neue',"
+                             "helvetica,arial,sans-serif;line-height:27px;color:#333333;font-size:18px")
+                        p_parts_img.append(f'<p style="{s}">• {inner}</p>')
+                else:
+                    ph = tag_to_email_p(tag, channel_key, campaign, date, segment=segment)
+                    if ph:
+                        p_parts_img.append(ph)
+            paragraphs_img = strip_trailing_empty_paragraphs('\n'.join(p_parts_img))
+            return block_image_with_text(img_src, paragraphs_img), {
+                'type': 'block_image_text',
                 'image_url': img_src,
-                'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '',
-                'preview_text': 'Картинка',
+                'paragraphs_html': paragraphs_img,
+                'btn_text': '', 'btn_url_utm': '',
+                'preview_text': preview_text,
             }
 
     p_parts = []
@@ -2148,7 +2184,9 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 img_tag = el.find('img')
                 img_src = img_tag.get('src', '') if img_tag else ''
                 if img_src and (img_src.startswith('http') or img_src.startswith('data:image')):
+                    flush_pending()
                     pending_tags.append(el)
+                    # no immediate flush — following text accumulates into same block
                 else:
                     flush_pending()
         elif el.name == 'div':
@@ -2182,8 +2220,8 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 raw_blocks[i] = (_CYCLE_FN[new_type](ph), curr_meta)
         elif curr_type == 'block_blue_cta':
             cycle_pos = 0  # next plain block starts fresh at white
-        elif curr_type.startswith('block_2col') or curr_type == 'block_image':
-            cycle_pos = 1  # 2-col counts as white → next plain block is grey
+        elif curr_type.startswith('block_2col') or curr_type in ('block_image', 'block_image_text'):
+            cycle_pos = 1  # 2-col/image counts as white → next plain block is grey
         # block_button is transparent — doesn't affect the cycle
 
     # Handle adjacent block_blue_cta: convert the second into block_white + block_button
@@ -3144,6 +3182,8 @@ def api_assemble_email():
             row = block_spacer(block.get('height', 20))
         elif btype == 'block_image':
             row = block_image_center(block.get('image_url', ''))
+        elif btype == 'block_image_text':
+            row = block_image_with_text(block.get('image_url', ''), ph)
         elif btype == 'block_2col_img_text':
             row = block_2col_img_text(block.get('image_url', ''), ph)
         elif btype == 'block_2col_text_img':
