@@ -2570,6 +2570,11 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         # separators — spacers must not appear between list items.
         if '\n' in inner:
             sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
+            # Skip parts that are only HTML tags with no visible text — artifact from <br/>
+            # inside bold/italic wrappers (e.g. <b> alone from <b><br/>content</b> split).
+            sub_parts = [p for p in sub_parts if re.sub(r'<[^>]+>', '', p).strip()]
+            if not sub_parts:
+                continue
             balanced = []
             for part in sub_parts:
                 for t in ('i', 'b', 'u', 's'):
@@ -2670,6 +2675,11 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
         # so list items stay compact (no blank line between them in the output).
         if '\n' in inner:
             sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
+            # Skip parts that are only HTML tags with no visible text — artifact from <br/>
+            # inside bold/italic wrappers (e.g. <b> alone from <b><br/>content</b> split).
+            sub_parts = [p for p in sub_parts if re.sub(r'<[^>]+>', '', p).strip()]
+            if not sub_parts:
+                continue
             balanced = []
             for part in sub_parts:
                 for t in ('i', 'b', 'u', 's'):
