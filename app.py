@@ -715,6 +715,11 @@ def is_section_header(tag, ai_hints=None):
     if len(text) > 120:
         return None
 
+    # Merged email header: "ПОЧТА От кого: ...", "Почта ГК", "Почта (обычная)" etc.
+    # First word is a recognized email label followed by extra descriptor text.
+    if _first_word_alpha in {'почта', 'письмо'} and text != _first_word_alpha:
+        return 'email_section'
+
     # Skip rows that are clearly channel entries or service addresses
     skip_kw = ['care@', '@zerocoder', 'getcourse', 'unisender', 'bot (',
                'zerocoder_bot', 'zerocoder.ru', 'newcat.zerocoder']
@@ -723,7 +728,7 @@ def is_section_header(tag, ai_hints=None):
 
     email_kw = ['контент письма', 'текст письма', 'текст:', 'текст для почты',
                 'почта:', 'почта (', '3.контент', '3. контент', 'e-mail:', 'письмо:',
-                'для почты', 'email:',
+                'для почты', 'email:', 'email от кого', 'email (гк',
                 # Group separators: start a new email variant (and later TG variant within them)
                 # "Другие источники" contains Unisender email + Voronki TG content
                 'другие источники', 'другие каналы', 'другой источник', 'другие боты',
@@ -755,7 +760,7 @@ def is_section_header(tag, ai_hints=None):
         return 'skip'
 
     # Standalone email section headers — exact match
-    email_exact = {'почта', 'письмо', 'e-mail'}
+    email_exact = {'почта', 'письмо', 'e-mail', 'email', 'почта гк', 'email гк', 'почта (гк)', 'mail'}
     if text in email_exact:
         return 'email_section'
 
@@ -775,7 +780,7 @@ def is_section_header(tag, ai_hints=None):
         return 'tg_section'
 
     # Skip standalone single-word channel-type labels that appear in config tables
-    if text in ('email', 'telegram/max', 'приложение'):
+    if text in ('telegram/max', 'приложение'):
         return None
 
     for kw in subject_kw:
@@ -1077,6 +1082,14 @@ def parse_doc_html(html_content, ai_hints=None):
 
         if section_type == 'email_section':
             name = get_text_content(tag).strip()
+            # Capture sender from "От кого: ..." suffix embedded in the header line
+            if not sender:
+                m = re.search(r'от\s+кого\s*[:\s]\s*(.+)', name, re.IGNORECASE)
+                if m:
+                    val = m.group(1).strip()
+                    if 'зерокодер' not in val.lower():
+                        val = val + ' из Зерокодера'
+                    sender = val
             # Trim "От кого: ..." suffix from sub-variant names
             name = re.sub(r'\s+от кого.*', '', name, flags=re.IGNORECASE).strip()
             email_subsections.append({'name': name[:50], 'blocks': []})
@@ -2542,6 +2555,14 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         if not inner:
             continue
 
+        # Fix Google Docs artifact: hyperlink on trailing space instead of button text.
+        # <b>BUTTON</b><a href="URL"> </a>  →  <b><a href="URL">BUTTON</a></b>
+        inner = re.sub(
+            r'<b>([^<>]+)</b>\s*<a href="([^"]+)">[\s\xa0]*</a>',
+            r'<b><a href="\2">\1</a></b>',
+            inner
+        )
+
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
 
@@ -2633,6 +2654,14 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
         inner = re.sub(r'(?:<[^>]+>)*\s*ссылка:\s*(?:<\/[^>]+>)*\s*', '', inner, flags=re.IGNORECASE).strip()
         if not inner:
             continue
+
+        # Fix Google Docs artifact: hyperlink on trailing space instead of button text.
+        # <b>BUTTON</b><a href="URL"> </a>  →  <b><a href="URL">BUTTON</a></b>
+        inner = re.sub(
+            r'<b>([^<>]+)</b>\s*<a href="([^"]+)">[\s\xa0]*</a>',
+            r'<b><a href="\2">\1</a></b>',
+            inner
+        )
 
         if tag.name in ('h1', 'h2', 'h3', 'h4'):
             inner = f'<b>{inner}</b>'
