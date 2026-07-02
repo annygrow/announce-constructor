@@ -1096,7 +1096,7 @@ async function reassembleEmail(channelKey) {
     const resp = await fetch('/api/assemble-email', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blocks, subject, images }),
+      body: JSON.stringify({ blocks, subject, images, channel_key: channelKey }),
     });
     const data = await resp.json();
     if (data.html) {

@@ -396,6 +396,15 @@ EMAIL_FOOTER = '''
 </table>
 '''
 
+EMAIL_AD_DISCLAIMER = '''
+<table cellspacing="0" cellpadding="0" align="center" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#ffffff;width:600px">
+<tr><td align="center" style="padding:16px 20px 16px;margin:0">
+<p style="margin:0 0 4px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:16px;color:#999999;font-size:11px">РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>
+<p style="margin:0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:16px;color:#999999;font-size:11px">ИНН 9715401631</p>
+</td></tr>
+</table>
+'''
+
 EMAIL_WRAPPER_END = '''
 </td></tr>
 </table>
@@ -718,7 +727,7 @@ def is_section_header(tag, ai_hints=None):
     # Must run BEFORE the length guard, since merged paragraphs are long.
     _first_word_raw = text.split()[0] if text.split() else ''
     _first_word_alpha = ''.join(ch for ch in _first_word_raw if ch.isalpha())
-    if _first_word_alpha in {'телеграм', 'telegram', 'тг', 'tg'} and text != _first_word_alpha:
+    if _first_word_alpha in {'телеграм', 'telegram', 'тг', 'tg', 'бот', 'bot'} and text != _first_word_alpha:
         return 'tg_section'
 
     # Section headers are short labels, not body sentences
@@ -786,7 +795,7 @@ def is_section_header(tag, ai_hints=None):
     first_word = text.split()[0] if text.split() else ''
     # Also handle label glued to emoji without space: "Телеграм🎉..."
     first_word_alpha = ''.join(ch for ch in first_word if ch.isalpha()).lower()
-    if first_word_alpha in {'телеграм', 'telegram'}:
+    if first_word_alpha in {'телеграм', 'telegram', 'бот', 'bot'}:
         return 'tg_section'
 
     # Skip standalone single-word channel-type labels that appear in config tables
@@ -2285,11 +2294,13 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
     logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
     subject_safe = subject or 'Рассылка ZeroCoder'
 
+    ad_block = EMAIL_AD_DISCLAIMER if channel_key == 'email_unisender' else ''
     html = (
         EMAIL_WRAPPER_START.replace('{subject}', subject_safe)
         + logo_header
         + content_table
         + EMAIL_FOOTER
+        + ad_block
         + EMAIL_WRAPPER_END
     )
     return html, blocks_data, uploaded_urls
@@ -3094,6 +3105,7 @@ def api_assemble_email():
     blocks = data.get('blocks', [])
     subject = data.get('subject', '')
     images = data.get('images', [])
+    channel_key = data.get('channel_key', '')
 
     content_rows = []
     for block in blocks:
@@ -3204,11 +3216,13 @@ def api_assemble_email():
     )
     logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
     subject_safe = subject or 'Рассылка ZeroCoder'
+    ad_block = EMAIL_AD_DISCLAIMER if channel_key == 'email_unisender' else ''
     html = (
         EMAIL_WRAPPER_START.replace('{subject}', subject_safe)
         + logo_header
         + content_table
         + EMAIL_FOOTER
+        + ad_block
         + EMAIL_WRAPPER_END
     )
     return jsonify({'html': html})
