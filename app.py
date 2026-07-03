@@ -1128,7 +1128,7 @@ def parse_doc_html(html_content, ai_hints=None):
             # "Merged" means the paragraph has more than just the section-label word.
             # We detect this by checking that the tag contains at least two distinct spans
             # (the label span and the content span), or the text is longer than the label alone.
-            tg_label_words = {'телеграм', 'telegram', 'тг', 'tg', 'max'}
+            tg_label_words = {'телеграм', 'telegram', 'тг', 'tg', 'max', 'бот', 'bot'}
             full_lower = full_text.lower()
             # Strip leading alpha chars to get the label (handles "Телеграм🎉..." glued together)
             first_word_raw = full_text.split()[0] if full_text.split() else ''
@@ -1141,12 +1141,12 @@ def parse_doc_html(html_content, ai_hints=None):
                     for span in list(tag_copy.find_all('span')):
                         span_text = get_text_content(span).strip()
                         span_text_alpha = ''.join(ch for ch in span_text if ch.isalpha()).lower()
-                        # Exact match: "Телеграм", "Telegram", "Max"
+                        # Exact match: "Телеграм", "Telegram", "Max", "Бот"
                         if span_text_alpha == first_word_alpha:
                             span.decompose()
                             break
-                        # Short multi-word label starting with тг/tg: "ТГ бот (ГК)", "TG Bot"
-                        if (first_word_alpha in ('тг', 'tg') and
+                        # Short multi-word label starting with тг/tg or бот/bot: "ТГ бот (ГК)", "БОТ (1 клик)"
+                        if (first_word_alpha in ('тг', 'tg', 'бот', 'bot') and
                                 span_text_alpha.startswith(first_word_alpha) and
                                 len(span_text) <= 40):
                             span.decompose()
