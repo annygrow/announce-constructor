@@ -764,7 +764,7 @@ def is_section_header(tag, ai_hints=None):
     subject_kw = ['тема письма', 'тема:', 'темы:', 'subject:']
     preview_kw = ['превью:', 'прехедер:', 'прехендер:', 'preview:', 'preheader:', 'preheader :', 'прехэдер:']
     meta_kw = ['кампания:', 'каналы ', 'каналы(', 'сегмент ', 'сегмент(',
-               'исключаем', 'включаем', 'от кого:', 'from:']
+               'исключаем', 'включаем', 'от кого:', 'from:', 'отправитель:']
 
     # Meta-content labels: skip entirely (neither section header nor content)
     meta_label_kw = ['от лица ', 'от лица:', 'в 1 клик', 'в 2 клик', 'в один клик',
@@ -1079,9 +1079,9 @@ def parse_doc_html(html_content, ai_hints=None):
 
         if section_type == 'skip':
             raw_text = get_text_content(tag).strip()
-            # Capture sender name from "от кого: ..." meta line before discarding
+            # Capture sender name from "от кого: ..." / "отправитель: ..." meta line before discarding
             if not sender:
-                m = re.match(r'^от\s+кого\s*[:\s]\s*(.+)', raw_text, re.IGNORECASE)
+                m = re.match(r'^(?:от\s+кого|отправитель)\s*[:\s]\s*(.+)', raw_text, re.IGNORECASE)
                 if m:
                     val = m.group(1).strip()
                     if 'зерокодер' not in val.lower():
