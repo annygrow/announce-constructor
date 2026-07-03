@@ -3464,6 +3464,75 @@ def _gc_fix_bot(mailing_id, transport):
     except Exception as e:
         logging.warning(f'[GC Bot Fix] {e}')
 
+
+def _gc_fix_mailing_playwright(mailing_id, transport):
+    """Configure GC mailing via Playwright: set bot (TG) or recipient type (email)."""
+    gc_url_base = os.getenv('GC_ACCOUNT_URL', '').rstrip('/')
+    if not gc_url_base:
+        logging.warning('[GC PW Fix] GC_ACCOUNT_URL not configured')
+        return
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logging.warning('[GC PW Fix] playwright not installed; falling back to HTTP fix')
+        _gc_fix_bot(mailing_id, transport)
+        return
+
+    # Reuse existing HTTP login to get authenticated session cookies
+    s, _ = _gc_login_session()
+    if not s:
+        logging.warning('[GC PW Fix] GC login failed')
+        return
+
+    domain = gc_url_base.replace('https://', '').replace('http://', '')
+    pw_cookies = [
+        {'name': c.name, 'value': c.value, 'domain': domain, 'path': c.path or '/'}
+        for c in s.cookies
+    ]
+
+    page_url = f'{gc_url_base}/notifications/control/mailings/update/id/{mailing_id}'
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage'],
+        )
+        ctx = browser.new_context(viewport={'width': 1280, 'height': 900})
+        ctx.add_cookies(pw_cookies)
+        page = ctx.new_page()
+        try:
+            page.goto(page_url, timeout=30000)
+            page.wait_for_load_state('networkidle', timeout=20000)
+
+            if transport == 'ticket':
+                # Wait for bot select (might be inside a tab)
+                page.wait_for_selector('select#mailing_bot_id', timeout=10000)
+                # Set value to 0 = "Любой бот" directly on native select, then notify Select2
+                page.evaluate("document.querySelector('select#mailing_bot_id').value = '0'")
+                page.evaluate(
+                    "if (window.jQuery) { jQuery('#mailing_bot_id').trigger('change'); }"
+                )
+
+            elif transport == 'email':
+                # Click "Сегмент" radio button for recipients type
+                page.click('#ParamsObject_recipients_type_2')
+                page.wait_for_timeout(400)
+                # Click "Всем выбранным адресам" radio button
+                page.click('#ParamsObject_send_to_0')
+
+            # Click the Save button
+            save_btn = page.locator('input[name="save"], button[name="save"]').first
+            save_btn.click()
+            page.wait_for_load_state('networkidle', timeout=20000)
+
+            logging.info(f'[GC PW Fix] mailing={mailing_id} transport={transport} saved OK')
+        except Exception as e:
+            logging.warning(f'[GC PW Fix] mailing={mailing_id} transport={transport}: {e}')
+        finally:
+            browser.close()
+
+
 _GC_TRANSPORT = {
     'email':           'email',
     'email_unisender': 'email',
@@ -3559,7 +3628,7 @@ def api_push_to_mail():
         resp.raise_for_status()
         result = resp.json()
         job_id = result.get('job_id')
-        if job_id and transport in _BOT_FIELD:
+        if job_id and (transport in _BOT_FIELD or transport == 'email'):
             _pending_bot_fix[job_id] = transport
         return jsonify({'ok': True, 'job_id': job_id, 'count': result.get('count', 1)})
     except requests.RequestException as e:
@@ -3590,11 +3659,16 @@ def api_job_status(job_id):
             if mailing_id:
                 gc_url = f'https://{gc_domain}/notifications/control/mailings/update/id/{mailing_id}'
 
-        # Fix bot once when job is complete and mailing_id is known
+        # Fix bot/recipients once when job is complete and mailing_id is known
         transport = _pending_bot_fix.get(job_id)
         if transport and mailing_id and job_id not in _bot_fixed:
             _bot_fixed.add(job_id)
-            threading.Thread(target=_gc_fix_bot, args=(mailing_id, transport), daemon=True).start()
+            if transport == 'max':
+                # Max bot fix works reliably via HTTP
+                threading.Thread(target=_gc_fix_bot, args=(mailing_id, transport), daemon=True).start()
+            else:
+                # TG bot (Select2) and email recipients require browser automation
+                threading.Thread(target=_gc_fix_mailing_playwright, args=(mailing_id, transport), daemon=True).start()
 
         return jsonify({
             'status': job_data.get('status'),
