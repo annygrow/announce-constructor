@@ -2396,9 +2396,10 @@ def _md_wrap(marker, inner):
     stripped = inner.strip()
     leading  = inner[:len(inner) - len(inner.lstrip())]
     trailing = inner[len(inner.rstrip()):]
-    # Move trailing non-word characters outside the closing marker.
-    # e.g. «**потом».**  →  «**потом**».
-    m = re.match(r'^(.*\w)([\W]+)$', stripped, re.DOTALL)
+    # Move trailing sentence punctuation outside the closing marker so Telegram
+    # recognises the closing delimiter. Closing quotes (») stay inside bold.
+    # e.g. **потом».**  →  **потом»**. (only . is moved, » stays inside)
+    m = re.match(r'^(.*[^.,;:!?])([\.,;:!?]+)$', stripped, re.DOTALL)
     tail_punct = m.group(2) if m else ''
     if m:
         stripped = m.group(1)
@@ -2526,6 +2527,10 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
                 r'**\1',
                 inner
             )
+
+        # Move opening guillemet inside bold: «**text»** → **«text»**
+        # Telegram Markdown requires ** at a word boundary; «** is often not recognised.
+        inner = re.sub(r'«\*\*', '**«', inner)
 
         # <p> tags with <br>-separated items (custom bullet lists) come in as single
         # string with \n inside. Keep as ONE block joined with \n so items are
