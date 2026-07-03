@@ -3506,8 +3506,8 @@ def _gc_fix_mailing_playwright(mailing_id, transport):
             page.wait_for_load_state('networkidle', timeout=20000)
 
             if transport == 'ticket':
-                # Wait for bot select (might be inside a tab)
-                page.wait_for_selector('select#mailing_bot_id', timeout=10000)
+                # Select2 hides the native select (tabindex=-1), so wait for DOM presence only
+                page.wait_for_selector('select#mailing_bot_id', state='attached', timeout=10000)
                 # Set value to 0 = "Любой бот" directly on native select, then notify Select2
                 page.evaluate("document.querySelector('select#mailing_bot_id').value = '0'")
                 page.evaluate(
@@ -3521,9 +3521,8 @@ def _gc_fix_mailing_playwright(mailing_id, transport):
                 # Click "Всем выбранным адресам" radio button
                 page.click('#ParamsObject_send_to_0')
 
-            # Click the Save button
-            save_btn = page.locator('input[name="save"], button[name="save"]').first
-            save_btn.click()
+            # Submit form via JS — GC's save button is a hidden input, not clickable
+            page.evaluate("document.querySelector('form#yw0').submit()")
             page.wait_for_load_state('networkidle', timeout=20000)
 
             logging.info(f'[GC PW Fix] mailing={mailing_id} transport={transport} saved OK')
