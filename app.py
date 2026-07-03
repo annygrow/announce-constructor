@@ -3629,15 +3629,45 @@ def api_push_to_mail():
         result = resp.json()
         job_id = result.get('job_id')
         if job_id and (transport in _BOT_FIELD or transport == 'email'):
-            _pending_bot_fix[job_id] = transport
+            _jobs_register(job_id, transport)
         return jsonify({'ok': True, 'job_id': job_id, 'count': result.get('count', 1)})
     except requests.RequestException as e:
         return jsonify({'error': str(e)}), 500
 
 
-# job_id → transport, for bot-fix after job completes
-_pending_bot_fix: dict = {}
-_bot_fixed: set = set()  # job_ids already fixed
+# File-based job tracking — survives worker restarts and works across multiple gunicorn workers
+_JOBS_FILE = '/tmp/announce_pending_jobs.json'
+_jobs_lock = __import__('threading').Lock()
+
+
+def _jobs_register(job_id, transport):
+    """Record that this job needs a post-creation fix for the given transport."""
+    with _jobs_lock:
+        try:
+            with open(_JOBS_FILE) as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        data[str(job_id)] = {'transport': transport, 'fixed': False}
+        with open(_JOBS_FILE, 'w') as f:
+            json.dump(data, f)
+
+
+def _jobs_claim(job_id):
+    """Atomically return transport and mark fixed. Returns None if already fixed or unknown."""
+    with _jobs_lock:
+        try:
+            with open(_JOBS_FILE) as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        job = data.get(str(job_id))
+        if job and not job.get('fixed'):
+            data[str(job_id)]['fixed'] = True
+            with open(_JOBS_FILE, 'w') as f:
+                json.dump(data, f)
+            return job.get('transport')
+        return None
 
 
 @app.route('/api/job-status/<job_id>')
@@ -3660,14 +3690,11 @@ def api_job_status(job_id):
                 gc_url = f'https://{gc_domain}/notifications/control/mailings/update/id/{mailing_id}'
 
         # Fix bot/recipients once when job is complete and mailing_id is known
-        transport = _pending_bot_fix.get(job_id)
-        if transport and mailing_id and job_id not in _bot_fixed:
-            _bot_fixed.add(job_id)
+        transport = _jobs_claim(job_id) if mailing_id else None
+        if transport:
             if transport == 'max':
-                # Max bot fix works reliably via HTTP
                 threading.Thread(target=_gc_fix_bot, args=(mailing_id, transport), daemon=True).start()
             else:
-                # TG bot (Select2) and email recipients require browser automation
                 threading.Thread(target=_gc_fix_mailing_playwright, args=(mailing_id, transport), daemon=True).start()
 
         return jsonify({
