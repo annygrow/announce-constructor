@@ -1639,6 +1639,11 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
 
     # Build an ordered items list: {'kind': 'tag', 'tag': tag} or {'kind': 'btn', 'text': str, 'url': str}
     items = []
+    def _btn_norm(s):
+        """Normalize button text for duplicate detection (collapses nbsp and whitespace)."""
+        return re.sub(r'[\xa0\s]+', ' ', s).strip()
+    def _btn_already_exists(text):
+        return _btn_norm(text) in {_btn_norm(it['text']) for it in items if it['kind'] == 'btn'}
 
     for tag in tags:
         tag_text = tag.get_text(strip=True)
@@ -1692,9 +1697,13 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                     # Collect remaining text (after the button span) as a separate tag item
                     tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
                     if tag_copy:
+                        # Remove any <a> elements wrapping the button (Google Docs wraps spans in <a href>)
+                        for _ba in list(tag_copy.find_all('a', href=True)):
+                            if _BTN_BRACKET_RE.match(_strip_trailing_footnotes(_ba.get_text(strip=True))):
+                                _ba.decompose()
                         # Remove the first span (button) and any <br> and <sup> siblings
                         for child in list(tag_copy.children):
-                            if not hasattr(child, 'name'):
+                            if not hasattr(child, 'name') or child.name is None:
                                 continue
                             if child.name in ('br', 'sup'):
                                 child.decompose()
@@ -1733,11 +1742,39 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                         remaining = remaining[len(m2.group(1).strip()):].strip()
                     if remaining:
                         items.append({'kind': 'tag', 'tag': tag_copy})
-                items.append({'kind': 'btn', 'text': btn_label, 'url': btn_href})
+                if not _btn_already_exists(btn_label):
+                    items.append({'kind': 'btn', 'text': btn_label, 'url': btn_href})
                 found_btn_anchor = True
                 break
         if not found_btn_anchor:
-            items.append({'kind': 'tag', 'tag': tag})
+            # Case 2.5: brackets are OUTSIDE the <a> tag — e.g. "[<a>BUTTON</a>]Trailing text".
+            # a.get_text() has no brackets so Case 2 misses it; tag_text_clean has [a_text].
+            for a in tag.find_all('a', href=True):
+                a_text = _strip_trailing_footnotes(a.get_text(strip=True))
+                if a_text and f'[{a_text}]' in tag_text_clean:
+                    btn_href = a.get('href', '#')
+                    bracket_end = tag_text_clean.index(f'[{a_text}]') + len(f'[{a_text}]')
+                    trailing = tag_text_clean[bracket_end:].strip()
+                    if trailing:
+                        trailing_soup = BeautifulSoup(f'<p>{trailing}</p>', 'lxml')
+                        trailing_tag = trailing_soup.find('p')
+                        if trailing_tag:
+                            items.append({'kind': 'tag', 'tag': trailing_tag})
+                    if not _btn_already_exists(a_text):
+                        items.append({'kind': 'btn', 'text': a_text, 'url': btn_href})
+                    found_btn_anchor = True
+                    break
+        if not found_btn_anchor:
+            # Case 3: raw fallthrough. Detect "[BUTTON]trailing text" where BUTTON was
+            # already added to items — strip the bracket prefix, keep only trailing text.
+            m_pfx = re.match(r'^\s*([^\w\[\]]*)\[([^\]]+)\](.+)', tag_text_clean, re.DOTALL)
+            if m_pfx and m_pfx.group(3).strip() and _btn_already_exists(m_pfx.group(2)):
+                trailing = m_pfx.group(3).strip()
+                trailing_tag = BeautifulSoup(f'<p>{trailing}</p>', 'lxml').find('p')
+                if trailing_tag:
+                    items.append({'kind': 'tag', 'tag': trailing_tag})
+            else:
+                items.append({'kind': 'tag', 'tag': tag})
 
     has_btn = any(item['kind'] == 'btn' for item in items)
     has_checkmarks = any(c in combined_text for c in _CHECKMARKS)
@@ -2501,6 +2538,13 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
         # Normalize spaces inside { first_name } before stripping
         inner = re.sub(r'\{\s*first_name\s*\}', '{first_name}', inner)
         if CHANNELS.get(channel_key, {}).get('strip_gc_vars'):
+            # punct OUTSIDE closing ** (from _md_wrap moving trailing punct out of bold)
+            # e.g. **{first_name}**, привет → Привет
+            inner = re.sub(
+                r'\*\*\s*\{first_name\}\s*\*\*[,!?.;:\-–—]\s*([а-яёa-z])',
+                lambda m: m.group(1).upper(), inner
+            )
+            inner = re.sub(r'\*\*\s*\{first_name\}\s*\*\*[,!?.;:\-–—]\s*', '', inner)
             # ", **{first_name}**" — variable is bold, comma is outside the bold markers
             # e.g. "Привет, **{first_name}**. Я Павел" → "Привет. Я Павел"
             inner = re.sub(r'\s*,\s*\*\*\{first_name\}\*\*', '', inner)
@@ -2549,6 +2593,12 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
         cleaned = []
         for para in paragraphs:
             para = re.sub(r'\{\s*first_name\s*\}', '{first_name}', para)
+            # punct OUTSIDE closing ** (from _md_wrap moving trailing punct out of bold)
+            para = re.sub(
+                r'\*\*\s*\{first_name\}\s*\*\*[,!?.;:\-–—]\s*([а-яёa-z])',
+                lambda m: m.group(1).upper(), para
+            )
+            para = re.sub(r'\*\*\s*\{first_name\}\s*\*\*[,!?.;:\-–—]\s*', '', para)
             para = re.sub(r'\s*,\s*\*\*\{first_name\}\*\*', '', para)
             # **{first_name},** prefix followed by text: remove and capitalize next word
             para = re.sub(
@@ -2653,6 +2703,29 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         else:
             result_parts.append(f'<p>{inner}</p>')
 
+    # Group consecutive bullet <p>s (▪️/•/◾/etc.) into one result_parts entry so the
+    # spacer join below doesn't insert blank lines between bullet items.
+    grouped_parts = []
+    i = 0
+    while i < len(result_parts):
+        visible = re.sub(r'<[^>]+>', '', result_parts[i]).strip()
+        if visible and visible[0] in '▪•◾►▸▶':
+            run = [result_parts[i]]
+            j = i + 1
+            while j < len(result_parts):
+                vis_j = re.sub(r'<[^>]+>', '', result_parts[j]).strip()
+                if vis_j and vis_j[0] in '▪•◾►▸▶':
+                    run.append(result_parts[j])
+                    j += 1
+                else:
+                    break
+            grouped_parts.append('\n'.join(run))
+            i = j
+        else:
+            grouped_parts.append(result_parts[i])
+            i += 1
+    result_parts = grouped_parts
+
     # Always insert a blank-line spacer between every content block for TG readability.
     # (Empty paragraphs from Google Docs are filtered in tags_to_html, so we can't rely
     # on them being present — instead we add spacers unconditionally here.)
@@ -2678,6 +2751,17 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
 
     # Strip trailing spacers — legal notice adds its own leading spacer
     output = re.sub(r'(\s*<p>&nbsp;</p>\s*)+$', '', output)
+    # Defensive: balance <b>/<i>/<u>/<s> within each <p>...</p> block
+    def _balance_p(m):
+        seg = m.group(0)
+        inner_seg = seg[3:-4]  # strip leading <p> and trailing </p>
+        for t in ('b', 'i', 'u', 's'):
+            no = inner_seg.count(f'<{t}>')
+            nc = inner_seg.count(f'</{t}>')
+            if no > nc:
+                inner_seg += f'</{t}>' * (no - nc)
+        return f'<p>{inner_seg}</p>'
+    output = re.sub(r'<p>.*?</p>', _balance_p, output, flags=re.DOTALL)
     # Legal notice
     output += '\n<p>&nbsp;</p>\n<p>РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>\n<p>ИНН 9715401631</p>'
     return output
@@ -2768,6 +2852,18 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
     output = re.sub(r'<(b|i|u|s)>\s*</\1>', '', output, flags=re.IGNORECASE)
     # Remove stray closing tags at line start
     output = re.sub(r'^(\s*)(?:</b>|</i>|</u>|</s>)+', r'\1', output, flags=re.IGNORECASE | re.MULTILINE)
+    # Defensive: balance <b>/<i>/<u>/<s> per line
+    fixed_lines = []
+    for _ln in output.split('\n'):
+        for _t in ('b', 'i', 'u', 's'):
+            _no = _ln.count(f'<{_t}>')
+            _nc = _ln.count(f'</{_t}>')
+            if _no > _nc:
+                _ln += f'</{_t}>' * (_no - _nc)
+            elif _nc > _no:
+                _ln = f'<{_t}>' * (_nc - _no) + _ln
+        fixed_lines.append(_ln)
+    output = '\n'.join(fixed_lines)
     output += '\n\nРЕКЛАМА ООО "ЗЕРОКОДЕР"\nИНН 9715401631'
     return output
 
