@@ -154,7 +154,7 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 **СЕКЦИИ, КОТОРЫЕ НУЖНО ПРОПУСКАТЬ (не включать в контент)**:
 - строки-заголовки секций (сами метки, не контент)
 - строки "ссылки:", "список ссылок", "ссылки"
-- строки "кампания:", "каналы:", "сегмент:", "исключаем", "включаем", "from:", "от кого:"
+- строки "кампания:", "каналы:", "сегмент:", "исключаем", "включаем", "from:", "от кого:", "отправитель:"
 - строки с адресами "@zerocoder", "care@", "getcourse", "unisender", "zerocoder.ru"
 - строки "РЕКЛАМА ООО", "ИНН 9715401631" (юридический дисклеймер)
 - строки-сноски вида "[a]", "[b]", "[1]" (аннотации к ссылкам)
@@ -2388,13 +2388,23 @@ def _postprocess_md(text):
 
 
 def _md_wrap(marker, inner):
-    """Wrap inner text in Markdown markers, keeping spaces outside the markers."""
+    """Wrap inner text in Markdown markers, keeping spaces outside the markers.
+    Trailing punctuation (».,!?;:) is placed after the closing marker so Telegram
+    MarkdownV2 parser correctly recognises the closing delimiter."""
     if not inner or not inner.strip():
         return inner
     stripped = inner.strip()
     leading  = inner[:len(inner) - len(inner.lstrip())]
     trailing = inner[len(inner.rstrip()):]
-    return f'{leading}{marker}{stripped}{marker}{trailing}'
+    # Move trailing non-word characters outside the closing marker.
+    # e.g. «**потом».**  →  «**потом**».
+    m = re.match(r'^(.*\w)([\W]+)$', stripped, re.DOTALL)
+    tail_punct = m.group(2) if m else ''
+    if m:
+        stripped = m.group(1)
+    if not stripped:
+        return inner
+    return f'{leading}{marker}{stripped}{marker}{tail_punct}{trailing}'
 
 
 def clean_tag_for_tg_markdown(tag, links_collector, _in_bold=False):
