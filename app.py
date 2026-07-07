@@ -1431,12 +1431,14 @@ def parse_doc_html(html_content, ai_hints=None):
     from datetime import datetime as _dt
     def _norm_date(raw):
         raw = re.sub(r'\s*\.\s*', '.', raw.strip())
-        dm = re.match(r'^(\d{1,2}\.\d{1,2})(?:\.(\d{2,4}))?', raw)
+        dm = re.match(r'^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?', raw)
         if dm:
-            y = dm.group(2) or f'{_dt.now().year % 100:02d}'
+            day = f'{int(dm.group(1)):02d}'
+            mon = f'{int(dm.group(2)):02d}'
+            y = dm.group(3) or f'{_dt.now().year % 100:02d}'
             if len(y) == 4:
                 y = y[2:]
-            return f'{dm.group(1)}.{y}'
+            return f'{day}.{mon}.{y}'
         return raw
 
     doc_campaign = doc_campaign_found  # from "Кампания: slug" planning label (captured during skip)
