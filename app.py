@@ -820,6 +820,86 @@ def is_section_header(tag, ai_hints=None):
 
     return None
 
+
+def _get_trailing_email_label(tag):
+    """
+    Detects a merged Google Docs paragraph where body content and an email
+    section label (e.g. "Другие источники") share a single <p> tag, separated
+    by <br/> line-breaks.  Example DOM shape:
+        <p> <span>CTA button text</span> <span><br/><br/></span>
+            <span>Другие источники</span> </p>
+
+    Returns (label_name, pre_content_tag) when detected, otherwise None.
+    - label_name   : clean text of the section label ("Другие источники")
+    - pre_content_tag : a copy of the original tag with the label part removed,
+                        ready to be added as content to the current section.
+    """
+    other_src_kw = [
+        'другие источники', 'другие каналы', 'другой источник', 'другие боты',
+        'другой текст', 'для др источников', 'для других источников',
+        'др источники', 'для др. источников', 'другой ист', 'другие ист',
+    ]
+
+    # Only consider tags that contain <br/> tags
+    if not tag.find('br'):
+        return None
+
+    children = list(tag.children)
+
+    # Find the index of the LAST direct child that contains a <br/>
+    last_br_child_idx = -1
+    for i, child in enumerate(children):
+        if hasattr(child, 'find') and child.find('br'):
+            last_br_child_idx = i
+
+    if last_br_child_idx < 0:
+        return None
+
+    # Collect text from children AFTER the <br/>-containing child
+    post_children = children[last_br_child_idx + 1:]
+    post_text = ''.join(
+        c.get_text() if hasattr(c, 'get_text') else str(c)
+        for c in post_children
+    ).strip()
+    post_lower = post_text.lower()
+
+    matched_kw = None
+    for kw in other_src_kw:
+        if post_lower.startswith(kw):
+            matched_kw = kw
+            break
+
+    if not matched_kw:
+        return None
+
+    # Label must be short (it's a heading, not body content)
+    if len(post_text) > 60:
+        return None
+
+    # Require non-empty content BEFORE the label
+    pre_text = ''.join(
+        c.get_text() if hasattr(c, 'get_text') else str(c)
+        for c in children[:last_br_child_idx]
+    ).strip()
+    if not pre_text:
+        return None
+
+    # Build a copy of the tag with only the pre-label content
+    pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+    if pre_tag:
+        pre_children_copy = list(pre_tag.children)
+        # Re-locate the last <br/>-containing child in the copy
+        last_br_idx_copy = -1
+        for i, child in enumerate(pre_children_copy):
+            if hasattr(child, 'find') and child.find('br'):
+                last_br_idx_copy = i
+        if last_br_idx_copy >= 0:
+            for child in pre_children_copy[last_br_idx_copy:]:
+                child.extract()
+
+    return (post_text.strip(), pre_tag)
+
+
 def extract_footnotes(soup):
     """
     Extract footnote links from a Google Docs HTML export.
@@ -1075,6 +1155,26 @@ def parse_doc_html(html_content, ai_hints=None):
 
     def process_block(tag):
         nonlocal current_section, subject, preview, sender, doc_campaign_found
+
+        # Handle merged paragraph: body content + section label (e.g. "Другие источники")
+        # in the same <p>, separated by <br/> tags.  Split them before any other detection
+        # so that the CTA button stays in the current email section and the label correctly
+        # opens a new one.
+        if tag.find('br') and tag.name in ('p', 'li', 'h1', 'h2', 'h3', 'h4'):
+            split_result = _get_trailing_email_label(tag)
+            if split_result:
+                label_name, pre_tag = split_result
+                if pre_tag and get_text_content(pre_tag).strip():
+                    if current_section == 'tg_section' and tg_subsections:
+                        tg_subsections[-1]['blocks'].append(pre_tag)
+                    elif current_section == 'email_section' and email_subsections:
+                        email_subsections[-1]['blocks'].append(pre_tag)
+                    else:
+                        sections['other'].append(pre_tag)
+                email_subsections.append({'name': label_name[:50], 'blocks': []})
+                current_section = 'email_section'
+                return
+
         section_type = is_section_header(tag, ai_hints=ai_hints)
 
         if section_type == 'skip':
