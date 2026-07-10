@@ -1794,7 +1794,7 @@ def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18,
 
 # Matches paragraph whose entire text is [BUTTON TEXT] or EMOJI [BUTTON TEXT].
 # Group 1 = optional emoji/non-word prefix, Group 2 = text inside brackets.
-_BTN_BRACKET_RE = re.compile(r'^\s*([^\w\[\]]*)\[([^\]]+)\]\s*$', re.DOTALL)
+_BTN_BRACKET_RE = re.compile(r'^\s*([^\w\[\]]*)\[([^\]]+)\][^\w\[\]]*\s*$', re.DOTALL)
 
 # Matches standalone footnote reference paragraphs like [a], [b], [d], [1], [2]
 # These are Google Docs link annotations, not email content
