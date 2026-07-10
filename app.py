@@ -2193,6 +2193,25 @@ def _is_reklama(tag):
     t = tag.get_text(strip=True)
     return _REKLAMA_RE.search(t) or 'ИНН 9715401631' in t
 
+
+def _strip_reklama_from_tag(tag):
+    """
+    Return a copy of tag with РЕКЛАМА/ИНН legal-notice spans removed.
+    When a paragraph mixes real content (text + CTA) with the legal notice block
+    in a single <p>, the generator's 'skip if РЕКЛАМА' check would drop the whole
+    paragraph.  This function strips only the legal-notice spans so the real
+    content survives.  Returns None if nothing remains after stripping.
+    """
+    cloned = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+    if not cloned:
+        return None
+    for span in list(cloned.find_all('span')):
+        t = span.get_text(strip=True)
+        if _REKLAMA_RE.search(t) or 'ИНН 9715401631' in t:
+            span.decompose()
+    return cloned if cloned.get_text(strip=True) else None
+
+
 def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment=''):
     """Extract email-paragraph HTML from a table cell (for 2-col detection).
     Returns (text_html, buttons) where buttons = list of (btn_text, btn_url).
@@ -2712,7 +2731,12 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
 
         raw_text = tag.get_text(strip=True)
         if _REKLAMA_RE.search(raw_text) or 'ИНН 9715401631' in raw_text:
-            continue
+            tag = _strip_reklama_from_tag(tag)
+            if not tag:
+                continue
+            raw_text = tag.get_text(strip=True)
+            if not raw_text:
+                continue
         if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
             continue
 
@@ -2844,7 +2868,12 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
 
         raw_text = tag.get_text(strip=True)
         if _REKLAMA_RE.search(raw_text) or 'ИНН 9715401631' in raw_text:
-            continue
+            tag = _strip_reklama_from_tag(tag)
+            if not tag:
+                continue
+            raw_text = tag.get_text(strip=True)
+            if not raw_text:
+                continue
         if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
             continue
 
@@ -2992,7 +3021,12 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
 
         raw_text = tag.get_text(strip=True)
         if _REKLAMA_RE.search(raw_text) or 'ИНН 9715401631' in raw_text:
-            continue
+            tag = _strip_reklama_from_tag(tag)
+            if not tag:
+                continue
+            raw_text = tag.get_text(strip=True)
+            if not raw_text:
+                continue
         if re.match(r'^\[([a-zA-Z0-9])\]', raw_text):
             continue
 
