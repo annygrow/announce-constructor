@@ -352,7 +352,7 @@ EMAIL_WRAPPER_START = '''<!DOCTYPE html>
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <title>{subject}</title>
 <style type="text/css">
-body { margin:0; padding:0; background-color:#F6F6F6; }
+body { margin:0; padding:0; }
 img { border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; }
 a { text-decoration:none; }
 @media only screen and (max-width:600px) {
