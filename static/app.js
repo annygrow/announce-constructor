@@ -1242,17 +1242,21 @@ async function confirmPushToMail(channelKey) {
 }
 
 async function pollJobForUrl(jobId, statusEl, channelKey) {
-  const maxAttempts = 30;
+  const maxAttempts = 40;
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 3000));
     try {
       const r = await fetch(`/api/job-status/${jobId}`);
       const d = await r.json();
       if (d.gc_url) {
-        statusEl.innerHTML = `✓ Создано! <a href="${d.gc_url}" target="_blank" style="color:#a78bfa;text-decoration:underline">Открыть черновик →</a>`;
+        statusEl.innerHTML = `✓ Готово! <a href="${d.gc_url}" target="_blank" style="color:#a78bfa;text-decoration:underline">Открыть черновик →</a>`;
         return;
       }
-      if (d.status && !['pending', 'processing', 'creating'].includes(d.status)) {
+      if (d.status === 'configuring') {
+        statusEl.textContent = '⏳ АИ-сотрудник настраивает рассылку...';
+        continue;
+      }
+      if (d.status && !['pending', 'processing', 'creating', 'configuring'].includes(d.status)) {
         statusEl.textContent = '✓ Создано!';
         return;
       }

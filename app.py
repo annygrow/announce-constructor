@@ -3714,8 +3714,8 @@ def _gc_fix_bot(mailing_id, transport):
         logging.warning(f'[GC Bot Fix] {e}')
 
 
-def _gc_fix_mailing_playwright(mailing_id, transport):
-    """Configure GC mailing via Playwright: set bot (TG) or recipient type (email)."""
+def _gc_fix_mailing_playwright(mailing_id, transport, job_id=None):
+    """Configure GC mailing via Playwright: set bot (TG/Max) or recipient type (email)."""
     gc_url_base = os.getenv('GC_ACCOUNT_URL', '').rstrip('/')
     if not gc_url_base:
         logging.warning('[GC PW Fix] GC_ACCOUNT_URL not configured')
@@ -3783,6 +3783,8 @@ def _gc_fix_mailing_playwright(mailing_id, transport):
             logging.warning(f'[GC PW Fix] mailing={mailing_id} transport={transport}: {e}')
         finally:
             browser.close()
+            if job_id:
+                _jobs_set_pw_done(job_id)
 
 
 _GC_TRANSPORT = {
@@ -3908,13 +3910,13 @@ def _jobs_register(job_id, transport):
                 data = json.load(f)
         except Exception:
             data = {}
-        data[str(job_id)] = {'transport': transport, 'fixed': False}
+        data[str(job_id)] = {'transport': transport, 'fixed': False, 'pw_done': False}
         with open(_JOBS_FILE, 'w') as f:
             json.dump(data, f)
 
 
-def _jobs_claim(job_id):
-    """Atomically return transport and mark fixed. Returns None if already fixed or unknown."""
+def _jobs_claim(job_id, mailing_id=None, gc_url=None):
+    """Atomically return transport and mark fix as started. Returns None if already started."""
     with _jobs_lock:
         try:
             with open(_JOBS_FILE) as f:
@@ -3924,10 +3926,38 @@ def _jobs_claim(job_id):
         job = data.get(str(job_id))
         if job and not job.get('fixed'):
             data[str(job_id)]['fixed'] = True
+            if mailing_id:
+                data[str(job_id)]['mailing_id'] = str(mailing_id)
+            if gc_url:
+                data[str(job_id)]['gc_url'] = gc_url
             with open(_JOBS_FILE, 'w') as f:
                 json.dump(data, f)
             return job.get('transport')
         return None
+
+
+def _jobs_get(job_id):
+    """Return current job data without modifying it."""
+    try:
+        with open(_JOBS_FILE) as f:
+            data = json.load(f)
+        return data.get(str(job_id))
+    except Exception:
+        return None
+
+
+def _jobs_set_pw_done(job_id):
+    """Mark the playwright fix as completed so job-status can release gc_url."""
+    with _jobs_lock:
+        try:
+            with open(_JOBS_FILE) as f:
+                data = json.load(f)
+        except Exception:
+            return
+        if str(job_id) in data:
+            data[str(job_id)]['pw_done'] = True
+            with open(_JOBS_FILE, 'w') as f:
+                json.dump(data, f)
 
 
 @app.route('/api/job-status/<job_id>')
@@ -3938,6 +3968,14 @@ def api_job_status(job_id):
     gc_domain = os.getenv('GC_DOMAIN', 'university.zerocoder.ru')
     headers = {'Authorization': f'Bearer {mail_token}'}
     try:
+        # If playwright fix is in progress, don't show the link yet
+        existing = _jobs_get(job_id)
+        if existing and existing.get('fixed') and not existing.get('pw_done'):
+            return jsonify({'status': 'configuring', 'gc_url': None, 'done': 0, 'total': 1})
+        # If playwright already done, return stored gc_url immediately
+        if existing and existing.get('pw_done') and existing.get('gc_url'):
+            return jsonify({'status': 'done', 'gc_url': existing['gc_url'], 'done': 1, 'total': 1})
+
         resp = requests.get(f'{mail_url}/api/jobs/{job_id}', headers=headers, timeout=15)
         job_data = resp.json()
         logging.info(f"job-status {job_id}: {job_data}")
@@ -3949,13 +3987,16 @@ def api_job_status(job_id):
             if mailing_id:
                 gc_url = f'https://{gc_domain}/notifications/control/mailings/update/id/{mailing_id}'
 
-        # Fix bot/recipients once when job is complete and mailing_id is known
-        transport = _jobs_claim(job_id) if mailing_id else None
+        # Start fix once when mailing_id is known; withhold gc_url until fix completes
+        transport = _jobs_claim(job_id, mailing_id=mailing_id, gc_url=gc_url) if mailing_id else None
         if transport:
-            if transport == 'max':
-                threading.Thread(target=_gc_fix_bot, args=(mailing_id, transport), daemon=True).start()
-            else:
-                threading.Thread(target=_gc_fix_mailing_playwright, args=(mailing_id, transport), daemon=True).start()
+            threading.Thread(
+                target=_gc_fix_mailing_playwright,
+                args=(mailing_id, transport, job_id),
+                daemon=True,
+            ).start()
+            # Don't return gc_url yet — let playwright finish first
+            return jsonify({'status': 'configuring', 'gc_url': None, 'done': 0, 'total': 1})
 
         return jsonify({
             'status': job_data.get('status'),
