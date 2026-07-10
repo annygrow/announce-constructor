@@ -277,7 +277,16 @@ def parse_with_ai(raw_html):
     client = OpenAI(api_key=api_key, base_url=base_url)
 
     soup = BeautifulSoup(raw_html, 'lxml')
-    plain_text = soup.get_text(separator='\n', strip=True)
+    # Build plain text paragraph-by-paragraph using empty separator within each paragraph
+    # so words split across adjacent spans (Google Docs artifact) stay intact.
+    # '\n'.join keeps document structure visible to the AI.
+    _body = soup.find('body') or soup
+    _paras = _body.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'li'])
+    plain_text = '\n'.join(
+        ' '.join(p.get_text('').replace('\xa0', ' ').split())
+        for p in _paras
+        if p.get_text(strip=True)
+    )
 
     if len(plain_text) > 30000:
         plain_text = plain_text[:30000]
@@ -713,6 +722,9 @@ def is_section_header(tag, ai_hints=None):
     text = get_text_content(tag).lower().strip()
     # Normalize soft-return line breaks so "Сообщение\nдля бота ТГ" matches keywords.
     text = text.replace('\n', ' ')
+    # Normalize "тема :" → "тема:" — Google Docs splits label and colon into separate
+    # spans; get_text_content() inserts a space between them, breaking startswith checks.
+    text = re.sub(r'\s+:', ':', text)
     if not text:
         return None
 
@@ -1263,31 +1275,38 @@ def parse_doc_html(html_content, ai_hints=None):
                         tg_subsections[-1]['blocks'].append(tag_copy)
             return
         if section_type == 'subject':
-            # Extract text after the keyword from the tag itself
-            raw = get_text_content(tag).strip()
-            extracted = re.sub(r'^[^:]+:\s*', '', raw, count=1).strip()
+            # Use empty separator so adjacent spans within one word don't get a
+            # spurious space (e.g. "п" + "оследний" → "последний", not "п оследний").
+            raw = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+            extracted = re.sub(r'^[^:]+\s*:\s*', '', raw, count=1).strip()
             if extracted and not subject:
                 subject = extracted
             return  # consumed, don't add to any section
         if section_type == 'preview':
-            raw = get_text_content(tag).strip()
-            extracted = re.sub(r'^[^:]+:\s*', '', raw, count=1).strip()
+            raw = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+            extracted = re.sub(r'^[^:]+\s*:\s*', '', raw, count=1).strip()
             if extracted and not preview:
                 preview = extracted
             return
 
         # Also detect inline subject/preview in the 'other' or 'email_section' when
         # the keyword and value are on the SAME line (e.g. "Тема: My Subject")
-        if not subject or not preview:
-            txt = get_text_content(tag).strip()
-            txt_lower = txt.lower()
-            for kw in ['тема письма:', 'тема:', 'темы:', 'subject:']:
-                if txt_lower.startswith(kw) and not subject:
-                    subject = re.sub(r'^[^:]+:\s*', '', txt, count=1).strip()
-                    return
+        # Normalize "тема :" → "тема:" to handle span-split formatting artifacts.
+        txt = get_text_content(tag).strip()
+        txt_lower = re.sub(r'\s+:', ':', txt.lower())
+        # Always consume subject-keyword paragraphs — even if subject is already set —
+        # so they never bleed into the email body as visible content.
+        for kw in ['тема письма:', 'тема:', 'темы:', 'subject:']:
+            if txt_lower.startswith(kw):
+                if not subject:
+                    raw0 = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+                    subject = re.sub(r'^[^:]+\s*:\s*', '', raw0, count=1).strip()
+                return
+        if not preview:
             for kw in ['превью:', 'прехедер:', 'preview:', 'preheader:']:
-                if txt_lower.startswith(kw) and not preview:
-                    preview = re.sub(r'^[^:]+:\s*', '', txt, count=1).strip()
+                if txt_lower.startswith(kw):
+                    raw0 = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+                    preview = re.sub(r'^[^:]+\s*:\s*', '', raw0, count=1).strip()
                     return
 
         if current_section == 'tg_section' and tg_subsections:
