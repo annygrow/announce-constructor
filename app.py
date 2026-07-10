@@ -1209,7 +1209,15 @@ def parse_doc_html(html_content, ai_hints=None):
     }
     But we return serialised HTML strings, not soup objects, for JSON serialisation.
     """
-    # Normalize {First name}, {First Name}, {FIRST NAME} etc. → {first_name}
+    # Google Docs splits {First name} across 3 spans: <span>{</span><span>First name</span><span>}...
+    # Consolidate to {first_name} before BS4 parsing so the variable is a single text node.
+    html_content = re.sub(
+        r'<span[^>]*>\{</span>\s*<span[^>]*>First\s+name</span>\s*<span([^>]*)>\}',
+        r'{first_name}<span\1>',
+        html_content,
+        flags=re.IGNORECASE
+    )
+    # Normalize remaining {First name}, {First Name}, {FIRST NAME} etc. → {first_name}
     html_content = re.sub(r'\{first[\s_]name\}', '{first_name}', html_content, flags=re.IGNORECASE)
 
     soup = BeautifulSoup(html_content, 'lxml')
