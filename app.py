@@ -499,13 +499,23 @@ def block_blue_text(paragraphs_html):
         + '\n</td></tr>\n</table></td></tr>'
     )
 
-def block_button(btn_url, btn_text):
-    """Standalone button on white background, centered."""
+def block_button(btn_url, btn_text, paragraphs_html=''):
+    """Standalone button on white background, centered.
+    If paragraphs_html is given (e.g. text that follows the button in the
+    source doc), it's rendered below the button in the SAME white block
+    instead of a separate one."""
     btn_style = (
         "background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
         "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
         "font-size:16px;display:inline-block;font-weight:600"
     )
+    if paragraphs_html.strip():
+        return (
+            '<tr><td align="left" bgcolor="#ffffff" style="padding:8px 20px 20px;margin:0;background-color:#ffffff">\n'
+            f'<div align="center" style="padding-bottom:10px"><a href="{btn_url}" target="_blank" style="{btn_style}">{btn_text}</a></div>\n'
+            + paragraphs_html
+            + '\n</td></tr>'
+        )
     return (
         '<tr><td align="center" bgcolor="#ffffff" style="padding:8px 20px 20px;background-color:#ffffff">\n'
         f'<a href="{btn_url}" target="_blank" style="{btn_style}">{btn_text}</a>\n'
@@ -2234,13 +2244,17 @@ def _strip_reklama_from_tag(tag):
 
 def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment=''):
     """Extract email-paragraph HTML from a table cell (for 2-col detection).
-    Returns (text_html, buttons) where buttons = list of (btn_text, btn_url).
+    Returns (text_html, buttons, btn_position) where buttons = list of (btn_text, btn_url)
+    and btn_position is the number of text paragraphs that appeared before the first
+    button (None if the cell has no button), so callers can restore paragraphs that
+    come after the button in the source doc instead of always rendering them first.
     Paragraphs matching [TEXT] with a hyperlink are extracted as buttons.
     """
     ctags = [t for t in cell.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
              if t.get_text(strip=True) and not _is_reklama(t)]
     parts = []
     buttons = []
+    btn_position = None
     for tag in ctags:
         text = tag.get_text(strip=True)
         text_clean = _strip_trailing_footnotes(text)
@@ -2254,6 +2268,8 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment='')
             raw_url = decode_google_redirect(link.get('href', '#') if link else '#')
             btn_url = build_utm_url(raw_url, channel_key, campaign, date, segment)
             buttons.append((btn_text, btn_url))
+            if btn_position is None:
+                btn_position = len(parts)
             continue
         # Detect "Кнопка: TEXT" prefix format (possibly multiple via <br> in one tag)
         if re.match(r'^кнопка:\s*', text_clean, re.IGNORECASE):
@@ -2266,6 +2282,8 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment='')
                 raw_url = decode_google_redirect(a.get('href', '#'))
                 btn_url = build_utm_url(raw_url, channel_key, campaign, date, segment)
                 buttons.append((lbl, btn_url))
+            if btn_position is None:
+                btn_position = len(parts)
             continue
         if tag.name in ('ul', 'ol'):
             for li in tag.find_all('li'):
@@ -2285,7 +2303,20 @@ def _cell_para_html(cell, channel_key, campaign, date, font_size=18, segment='')
             ph = tag_to_email_p(tag, channel_key, campaign, date, font_size=font_size, segment=segment)
             if ph:
                 parts.append(ph)
-    return '\n'.join(parts), buttons
+    return '\n'.join(parts), buttons, btn_position
+
+def _split_paras_at(html_str, position):
+    """Split joined paragraph HTML into (pre, post) at the given paragraph index.
+    Mirrors the pre/post split used for block_blue_cta so text after a button
+    in the source doc stays after the button instead of jumping above it."""
+    if not html_str.strip() or position is None:
+        return html_str, ''
+    soup_ph = BeautifulSoup(html_str, 'html.parser')
+    paras = soup_ph.find_all(['p', 'ul', 'ol'])
+    paras_html = [str(p) for p in paras if str(p).strip()] if paras else [html_str]
+    pre = '\n'.join(paras_html[:position])
+    post = '\n'.join(paras_html[position:])
+    return pre, post
 
 def generate_email_html(email_section_html, channel_key, campaign, date, images, subject='', segment=''):
     """
@@ -2373,8 +2404,8 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
 
             # 2-column table: flush pending first, then process
             flush_pending()
-            left_html,  left_btns  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16, segment=segment)
-            right_html, right_btns = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16, segment=segment)
+            left_html,  left_btns,  left_btn_pos  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16, segment=segment)
+            right_html, right_btns, right_btn_pos = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16, segment=segment)
             l_img = two_col_cells[0].find('img')
             r_img = two_col_cells[1].find('img')
             l_src = l_img.get('src', '') if l_img else ''
@@ -2390,38 +2421,64 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                     r_src = yc_url
                     uploaded_urls.append(yc_url)
 
+            # Paragraphs after the button in the source doc must stay after the
+            # button in the output too — split each cell's text around its own
+            # button position instead of always rendering all text first.
+            left_pre, left_post = _split_paras_at(left_html, left_btn_pos)
+            right_pre, right_post = _split_paras_at(right_html, right_btn_pos)
+
             row = None
             meta = None
+            post_text_parts = []
             if left_html.strip() and right_html.strip():
-                pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
-                meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_html,
-                        'col2_html': right_html, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                row = block_2col_text_text(left_html, right_html)
+                pv = BeautifulSoup(left_pre or left_html, 'lxml').get_text(strip=True)[:50]
+                meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_pre,
+                        'col2_html': right_pre, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                row = block_2col_text_text(left_pre, right_pre)
+                post_text_parts = [left_post, right_post]
             elif l_src and not left_html.strip() and right_html.strip():
                 img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else l_src
                 if user_img_idx[0] < len(images):
                     user_img_idx[0] += 1
-                pv = BeautifulSoup(right_html, 'lxml').get_text(strip=True)[:50]
-                meta = {'type': 'block_2col_img_text', 'paragraphs_html': right_html,
+                pv = BeautifulSoup(right_pre or right_html, 'lxml').get_text(strip=True)[:50]
+                meta = {'type': 'block_2col_img_text', 'paragraphs_html': right_pre,
                         'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                row = block_2col_img_text(img_to_use, right_html)
+                row = block_2col_img_text(img_to_use, right_pre)
+                post_text_parts = [right_post]
             elif r_src and not right_html.strip() and left_html.strip():
                 img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else r_src
                 if user_img_idx[0] < len(images):
                     user_img_idx[0] += 1
-                pv = BeautifulSoup(left_html, 'lxml').get_text(strip=True)[:50]
-                meta = {'type': 'block_2col_text_img', 'paragraphs_html': left_html,
+                pv = BeautifulSoup(left_pre or left_html, 'lxml').get_text(strip=True)[:50]
+                meta = {'type': 'block_2col_text_img', 'paragraphs_html': left_pre,
                         'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                row = block_2col_text_img(left_html, img_to_use)
+                row = block_2col_text_img(left_pre, img_to_use)
+                post_text_parts = [left_post]
 
             if row:
                 raw_blocks.append((row, meta))
-                for btn_text, btn_url in left_btns + right_btns:
+                all_btns = left_btns + right_btns
+                post_text_html = '\n'.join(t for t in post_text_parts if t.strip())
+                for i, (btn_text, btn_url) in enumerate(all_btns):
+                    # Attach text that follows the button in the source doc to the
+                    # SAME white button block, instead of a separate block — but only
+                    # when there's exactly one button (unambiguous where it goes).
+                    attach_text = post_text_html if (len(all_btns) == 1 and post_text_html.strip()) else ''
+                    btn_preview = btn_text
+                    if attach_text:
+                        btn_preview += ' ' + BeautifulSoup(attach_text, 'lxml').get_text(strip=True)
                     raw_blocks.append((
-                        block_button(btn_url, btn_text),
-                        {'type': 'block_button', 'paragraphs_html': '',
+                        block_button(btn_url, btn_text, attach_text),
+                        {'type': 'block_button', 'paragraphs_html': attach_text,
                          'btn_text': btn_text, 'btn_url_utm': btn_url,
-                         'preview_text': btn_text[:50]}
+                         'preview_text': btn_preview[:50]}
+                    ))
+                if post_text_html.strip() and len(all_btns) != 1:
+                    pv2 = BeautifulSoup(post_text_html, 'lxml').get_text(strip=True)[:50]
+                    raw_blocks.append((
+                        block_white(post_text_html),
+                        {'type': 'block_white', 'paragraphs_html': post_text_html,
+                         'btn_text': '', 'btn_url_utm': '', 'preview_text': pv2}
                     ))
                 return
 
@@ -3560,7 +3617,7 @@ def api_assemble_email():
         elif btype == 'block_blue_text':
             row = block_blue_text(ph)
         elif btype == 'block_button':
-            row = block_button(btn_url_utm, btn_text)
+            row = block_button(btn_url_utm, btn_text, ph)
         elif btype == 'block_spacer':
             row = block_spacer(block.get('height', 20))
         elif btype == 'block_image':

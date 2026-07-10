@@ -481,7 +481,8 @@ function createBlockCard(block, idx, channelKey, total) {
   const isFirst   = idx === 0;
   const isLast    = idx === total - 1;
   const isCta     = ['block_blue_cta', 'block_button'].includes(block.type);
-  const isNoText  = ['block_spacer', 'block_button'].includes(block.type);
+  const btnHasText = block.type === 'block_button' && (block.paragraphs_html || '').trim().length > 0;
+  const isNoText  = block.type === 'block_spacer' || (block.type === 'block_button' && !btnHasText);
   const is3col    = block.type === 'block_3col_text';
   const is2colTT  = block.type === 'block_2col_text_text';
 
@@ -802,7 +803,8 @@ function saveBlockEdit(channelKey, idx) {
   const block = (emailBlocks[channelKey] || [])[idx];
   if (!block) return;
 
-  const isNoText = ['block_spacer', 'block_button'].includes(block.type);
+  const btnHadText = block.type === 'block_button' && (block.paragraphs_html || '').trim().length > 0;
+  const isNoText = block.type === 'block_spacer' || (block.type === 'block_button' && !btnHadText);
   if (!isNoText) {
     const ta = area.querySelector('.block-edit-textarea');
     const text = ta ? ta.value : '';
