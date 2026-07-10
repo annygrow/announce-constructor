@@ -2789,6 +2789,11 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         inner = clean_tag_for_tg(tag).strip()
         if not inner:
             continue  # empty paragraphs skipped — spacers added uniformly below
+        # Remove empty formatting spans BEFORE splitting — Google Docs exports e.g.
+        # <b>\n</b> (a bold span containing only a <br/>), which after split creates
+        # a part starting with </b><b> (balanced 1:1, so the balance step ignores it)
+        # that ends up as <br></b><b> in the joined output.
+        inner = re.sub(r'<(b|i|u|s)>\s*</\1>', '', inner)
         # Also skip paragraphs that are HTML-only with no visible text (e.g. <b></b>, <b>&nbsp;</b>)
         inner_text = re.sub(r'<[^>]+>', '', inner).replace('&nbsp;', '').replace('\xa0', '').strip()
         if not inner_text:
@@ -2932,6 +2937,8 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
         inner = clean_tag_for_tg(tag).strip()
         if not inner:
             continue
+        # Same empty-span cleanup as in generate_tg_html (see comment there)
+        inner = re.sub(r'<(b|i|u|s)>\s*</\1>', '', inner)
         inner = re.sub(r'(?:<[^>]+>)*\s*ссылка:\s*(?:<\/[^>]+>)*\s*', '', inner, flags=re.IGNORECASE).strip()
         if not inner:
             continue
