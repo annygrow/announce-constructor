@@ -916,6 +916,63 @@ def _get_trailing_email_label(tag):
     return (post_text.strip(), pre_tag)
 
 
+def _get_trailing_tg_label(tag):
+    """
+    Detects a merged Google Docs paragraph where body content and a TG section
+    label (e.g. "Бот (общий)") share a single <p> tag, separated by <br/> tags.
+    Example DOM shape:
+        <p> <span>...РЕКЛАМА...</span> <span><br/></span>
+            <span style="font-weight:700">Бот (общий)</span> </p>
+
+    Returns (label_name, pre_content_tag) when detected, otherwise None.
+    """
+    if not tag.find('br'):
+        return None
+
+    children = list(tag.children)
+
+    last_br_child_idx = -1
+    for i, child in enumerate(children):
+        if hasattr(child, 'find') and child.find('br'):
+            last_br_child_idx = i
+
+    if last_br_child_idx < 0:
+        return None
+
+    post_children = children[last_br_child_idx + 1:]
+    post_text = ''.join(
+        c.get_text() if hasattr(c, 'get_text') else str(c)
+        for c in post_children
+    ).strip()
+    post_lower = post_text.lower()
+
+    if not re.match(r'^бот\s*\(', post_lower):
+        return None
+
+    if len(post_text) > 60:
+        return None
+
+    pre_text = ''.join(
+        c.get_text() if hasattr(c, 'get_text') else str(c)
+        for c in children[:last_br_child_idx]
+    ).strip()
+    if not pre_text:
+        return None
+
+    pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+    if pre_tag:
+        pre_children_copy = list(pre_tag.children)
+        last_br_idx_copy = -1
+        for i, child in enumerate(pre_children_copy):
+            if hasattr(child, 'find') and child.find('br'):
+                last_br_idx_copy = i
+        if last_br_idx_copy >= 0:
+            for child in pre_children_copy[last_br_idx_copy:]:
+                child.extract()
+
+    return (post_text.strip(), pre_tag)
+
+
 def extract_footnotes(soup):
     """
     Extract footnote links from a Google Docs HTML export.
@@ -1189,6 +1246,20 @@ def parse_doc_html(html_content, ai_hints=None):
                         sections['other'].append(pre_tag)
                 email_subsections.append({'name': label_name[:50], 'blocks': []})
                 current_section = 'email_section'
+                return
+
+            split_result_tg = _get_trailing_tg_label(tag)
+            if split_result_tg:
+                label_name, pre_tag = split_result_tg
+                if pre_tag and get_text_content(pre_tag).strip():
+                    if current_section == 'tg_section' and tg_subsections:
+                        tg_subsections[-1]['blocks'].append(pre_tag)
+                    elif current_section == 'email_section' and email_subsections:
+                        email_subsections[-1]['blocks'].append(pre_tag)
+                    else:
+                        sections['other'].append(pre_tag)
+                tg_subsections.append({'name': label_name[:50], 'blocks': []})
+                current_section = 'tg_section'
                 return
 
         section_type = is_section_header(tag, ai_hints=ai_hints)
