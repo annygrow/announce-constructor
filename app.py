@@ -376,7 +376,7 @@ EMAIL_HEADER = '''
 <table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">
 <tr><td align="center" style="padding:10px;margin:0;font-size:0px">
 <a href="https://zerocoder.ru/" target="_blank">
-<img src="{logo_url}" alt="ZeroCoder" width="220" style="display:block;border:0;max-width:220px">
+<img src="{logo_url}" alt="Зерокодер" width="220" style="display:block;border:0;max-width:220px">
 </a>
 </td></tr>
 </table></td></tr>
