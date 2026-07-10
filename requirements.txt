@@ -6,3 +6,4 @@ python-dotenv
 openai
 boto3
 playwright
+Pillow

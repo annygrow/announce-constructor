@@ -529,15 +529,55 @@ def block_spacer(height=20):
         f'background-color:#ffffff">&nbsp;</td></tr>'
     )
 
+_img_dim_cache = {}
+
+def _get_image_size(image_url):
+    """Return (width, height) of image_url, cached in memory. None if it can't be read."""
+    if not image_url:
+        return None
+    if image_url in _img_dim_cache:
+        return _img_dim_cache[image_url]
+    size = None
+    try:
+        from PIL import Image
+        from io import BytesIO
+        if image_url.startswith('http://') or image_url.startswith('https://'):
+            resp = requests.get(image_url, timeout=5)
+            resp.raise_for_status()
+            img = Image.open(BytesIO(resp.content))
+        else:
+            img = Image.open(image_url)
+        size = img.size
+    except Exception:
+        size = None
+    _img_dim_cache[image_url] = size
+    return size
+
+def _is_portrait_image(image_url, threshold=1.3):
+    """True if image height exceeds width by more than `threshold`x (tall/stretched-looking)."""
+    size = _get_image_size(image_url)
+    if not size or not size[0]:
+        return False
+    w, h = size
+    return (h / w) > threshold
+
+def _col_img_style(image_url):
+    """Style for a 2-col block image: cap by height if portrait so it doesn't
+    tower over a short text column, otherwise fill the column width as usual."""
+    if _is_portrait_image(image_url):
+        return "display:block;border:0;max-height:220px;width:auto;max-width:100%;border-radius:8px;margin:0 auto"
+    return "display:block;border:0;width:100%;max-width:260px;border-radius:8px"
+
 def block_2col_img_text(image_url, text_html):
     """Two-column block: image left, text right."""
     col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
+    img_style = _col_img_style(image_url)
     return (
         '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
         '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
         '<tr>\n'
         '<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%">\n'
-        f'<img src="{image_url}" alt="" class="es-col-img" style="display:block;border:0;width:100%;max-width:260px;border-radius:8px">\n'
+        f'<img src="{image_url}" alt="" class="es-col-img" style="{img_style}">\n'
         '</td>\n'
         f'<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%;{col_style}">\n'
         + text_html
@@ -547,6 +587,7 @@ def block_2col_img_text(image_url, text_html):
 def block_2col_text_img(text_html, image_url):
     """Two-column block: text left, image right."""
     col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
+    img_style = _col_img_style(image_url)
     return (
         '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
         '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
@@ -555,7 +596,7 @@ def block_2col_text_img(text_html, image_url):
         + text_html
         + '\n</td>\n'
         '<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%">\n'
-        f'<img src="{image_url}" alt="" class="es-col-img" style="display:block;border:0;width:100%;max-width:260px;border-radius:8px">\n'
+        f'<img src="{image_url}" alt="" class="es-col-img" style="{img_style}">\n'
         '</td>\n</tr>\n</table>\n</td></tr>'
     )
 
