@@ -3641,16 +3641,19 @@ def _gc_fix_mailing_playwright(mailing_id, transport):
                 page.evaluate(
                     "if (window.jQuery) { jQuery('#mailing_bot_id').trigger('change'); }"
                 )
+                page.wait_for_timeout(600)
 
             elif transport == 'email':
-                # Click "Сегмент" radio button for recipients type
+                # Click "Сегмент" radio — recipients_type=segment
                 page.click('#ParamsObject_recipients_type_2')
-                page.wait_for_timeout(400)
-                # Click "Всем выбранным адресам" radio button
+                page.wait_for_timeout(600)
+                # Click "Всем выбранным адресам" — send_to=all
                 page.click('#ParamsObject_send_to_0')
+                page.wait_for_timeout(300)
 
-            # Submit form via JS — GC's save button is a hidden input, not clickable
-            page.evaluate("document.querySelector('form#yw0').submit()")
+            # Click the real save button (.btn-save-mailing) so GC's submit event handlers
+            # (e.g. Select2 serialisation) run — form#yw0.submit() bypasses them.
+            page.click('.btn-save-mailing')
             page.wait_for_load_state('networkidle', timeout=20000)
 
             logging.info(f'[GC PW Fix] mailing={mailing_id} transport={transport} saved OK')
