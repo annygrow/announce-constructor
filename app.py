@@ -3754,23 +3754,24 @@ def _gc_fix_mailing_playwright(mailing_id, transport):
             page.goto(page_url, timeout=30000)
             page.wait_for_load_state('networkidle', timeout=20000)
 
-            if transport == 'ticket':
-                # Select2 hides the native select (tabindex=-1), so wait for DOM presence only
+            if transport in ('ticket', 'max'):
+                # TG and Max both use select#mailing_bot_id (only the name attr differs).
+                # Select2 hides the native select, so wait for DOM presence then set via jQuery.
                 page.wait_for_selector('select#mailing_bot_id', state='attached', timeout=10000)
-                # Set value to 0 = "Любой бот" directly on native select, then notify Select2
-                page.evaluate("document.querySelector('select#mailing_bot_id').value = '0'")
                 page.evaluate(
-                    "if (window.jQuery) { jQuery('#mailing_bot_id').trigger('change'); }"
+                    "if (window.jQuery) { jQuery('#mailing_bot_id').val('0').trigger('change'); }"
                 )
-                page.wait_for_timeout(600)
+                page.wait_for_timeout(800)
 
             elif transport == 'email':
                 # Click "Сегмент" radio — recipients_type=segment
+                page.wait_for_selector('#ParamsObject_recipients_type_2', timeout=10000)
                 page.click('#ParamsObject_recipients_type_2')
                 page.wait_for_timeout(600)
                 # Click "Всем выбранным адресам" — send_to=all
+                page.wait_for_selector('#ParamsObject_send_to_0', timeout=5000)
                 page.click('#ParamsObject_send_to_0')
-                page.wait_for_timeout(300)
+                page.wait_for_timeout(500)
 
             # Click the real save button (.btn-save-mailing) so GC's submit event handlers
             # (e.g. Select2 serialisation) run — form#yw0.submit() bypasses them.
