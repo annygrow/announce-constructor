@@ -693,7 +693,7 @@ def fetch_google_doc_html(doc_id):
 
 def get_text_content(tag):
     """Get plain text from a BS4 tag, collapsing whitespace."""
-    return ' '.join(tag.get_text(' ', strip=True).split())
+    return ' '.join(tag.get_text(' ', strip=True).replace('\xa0', ' ').split())
 
 def is_section_header(tag, ai_hints=None):
     """
@@ -2192,7 +2192,10 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
             el_txt = re.sub(r'\s+', ' ', el.get_text(strip=True).replace('\xa0', '')).strip()
             if el_txt:
                 _first_content_checked[0] = True
-                if el_txt == _subject_norm:
+                el_txt_no_label = re.sub(
+                    r'^(?:тема\s*(?:письма)?\s*:|subject\s*:)\s*', '', el_txt, flags=re.IGNORECASE
+                ).strip()
+                if el_txt == _subject_norm or el_txt_no_label == _subject_norm:
                     return  # duplicated subject — skip this element
         if el.name == 'table':
             # Detect 2-column table structure first (before any flush)
@@ -3738,6 +3741,9 @@ def api_push_to_mail():
         return jsonify({'ok': True, 'job_id': job_id, 'count': result.get('count', 1)})
     except requests.RequestException as e:
         return jsonify({'error': str(e)}), 500
+    except ValueError as e:
+        logging.exception("push-to-mail: non-JSON response from mail API")
+        return jsonify({'error': f'API вернул не-JSON ответ: {e}'}), 500
 
 
 # File-based job tracking — survives worker restarts and works across multiple gunicorn workers
