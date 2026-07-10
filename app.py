@@ -1209,6 +1209,9 @@ def parse_doc_html(html_content, ai_hints=None):
     }
     But we return serialised HTML strings, not soup objects, for JSON serialisation.
     """
+    # Normalize {First name}, {First Name}, {FIRST NAME} etc. → {first_name}
+    html_content = re.sub(r'\{first[\s_]name\}', '{first_name}', html_content, flags=re.IGNORECASE)
+
     soup = BeautifulSoup(html_content, 'lxml')
     inline_gdoc_formatting(soup)
     body = soup.find('body') or soup
