@@ -3894,13 +3894,14 @@ def api_push_to_mail():
 
 
 # File-based job tracking — survives worker restarts and works across multiple gunicorn workers
-_JOBS_FILE = '/tmp/announce_pending_jobs.json'
+_JOBS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gc_output', 'pending_jobs.json')
 _jobs_lock = __import__('threading').Lock()
 
 
 def _jobs_register(job_id, transport):
     """Record that this job needs a post-creation fix for the given transport."""
     with _jobs_lock:
+        os.makedirs(os.path.dirname(_JOBS_FILE), exist_ok=True)
         try:
             with open(_JOBS_FILE) as f:
                 data = json.load(f)
