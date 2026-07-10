@@ -105,6 +105,13 @@ def require_login():
             return jsonify({'error': 'Сессия истекла, войдите снова', 'auth': False}), 401
         return redirect(url_for('login'))
 
+@app.errorhandler(Exception)
+def handle_unhandled_exception(e):
+    app.logger.exception('Unhandled exception')
+    if request.path.startswith('/api/'):
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+    raise e
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
@@ -3796,29 +3803,33 @@ def api_push_to_gc():
     if not name or not html:
         return jsonify({'error': 'Нужны name и html'}), 400
 
-    os.makedirs(GC_OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(GC_OUTPUT_DIR, 'letters_built.json')
+    try:
+        os.makedirs(GC_OUTPUT_DIR, exist_ok=True)
+        out_path = os.path.join(GC_OUTPUT_DIR, 'letters_built.json')
 
-    existing = []
-    if os.path.exists(out_path):
-        try:
-            existing = json.loads(open(out_path, encoding='utf-8').read())
-        except Exception:
-            existing = []
+        existing = []
+        if os.path.exists(out_path):
+            try:
+                existing = json.loads(open(out_path, encoding='utf-8').read())
+            except Exception:
+                existing = []
 
-    updated = [e for e in existing if e.get('name') != name]
-    updated.append({
-        'name': name,
-        'subject': subject,
-        'html': html,
-        'channel_key': channel_key,
-        'transport': transport,
-    })
+        updated = [e for e in existing if e.get('name') != name]
+        updated.append({
+            'name': name,
+            'subject': subject,
+            'html': html,
+            'channel_key': channel_key,
+            'transport': transport,
+        })
 
-    with open(out_path, 'w', encoding='utf-8') as f:
-        json.dump(updated, f, ensure_ascii=False, indent=2)
+        with open(out_path, 'w', encoding='utf-8') as f:
+            json.dump(updated, f, ensure_ascii=False, indent=2)
 
-    return jsonify({'ok': True, 'total': len(updated)})
+        return jsonify({'ok': True, 'total': len(updated)})
+    except Exception as e:
+        app.logger.exception('push-to-gc failed')
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/push-to-mail', methods=['POST'])
