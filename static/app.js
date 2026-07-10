@@ -1157,6 +1157,7 @@ async function confirmPushToGC(channelKey) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, subject, html: content, channel_key: channelKey }),
     });
+    if (resp.status === 401) { window.location.href = '/login'; return; }
     const data = await resp.json();
     if (data.ok) {
       statusEl.textContent = `✓ Добавлено! В очереди: ${data.total}`;
@@ -1227,6 +1228,7 @@ async function confirmPushToMail(channelKey) {
         preheader, sender_name: senderName,
       }),
     });
+    if (resp.status === 401) { window.location.href = '/login'; return; }
     const data = await resp.json();
     if (data.ok) {
       statusEl.textContent = '⏳ Ожидаю черновик...';

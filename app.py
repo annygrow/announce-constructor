@@ -101,6 +101,8 @@ def require_login():
     if request.path.startswith('/static/') or request.path in ('/login', '/favicon.ico'):
         return None
     if not session.get('logged_in'):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'Сессия истекла, войдите снова', 'auth': False}), 401
         return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
