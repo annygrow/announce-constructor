@@ -1174,6 +1174,114 @@ def extract_all_links(soup):
             links.append({'url': resolved, 'text': a.get_text(strip=True)})
     return links
 
+_WHITE_BG = {'#ffffff', '#fff', 'white', 'transparent', 'none'}
+
+def extract_highlight_classes(soup):
+    """
+    Returns the set of CSS class names (from the doc's <style> block) that carry
+    a non-white background-color — i.e. text highlighted with a marker in Google Docs.
+    Used to detect which lines in a "Включаем:"-style list are actually marked,
+    regardless of which specific color was used.
+    """
+    style_tag = soup.find('style')
+    if not style_tag:
+        return set()
+    css_text = style_tag.get_text()
+    highlight_cls = set()
+    for selector, props in re.findall(r'(\.[\w-]+)\s*\{([^}]+)\}', css_text):
+        m = re.search(r'background-color:\s*([^;]+)', props.lower())
+        if m and m.group(1).strip() not in _WHITE_BG:
+            highlight_cls.add(selector[1:])
+    return highlight_cls
+
+
+def tag_is_highlighted(tag, highlight_classes):
+    """True if `tag` itself or any descendant carries a highlight class or an
+    inline non-white background-color style."""
+    if not highlight_classes:
+        return False
+    for t in [tag] + tag.find_all(True):
+        classes = t.get('class', [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        if any(c in highlight_classes for c in classes):
+            return True
+        style = t.get('style', '')
+        m = re.search(r'background-color:\s*([^;]+)', style.lower())
+        if m and m.group(1).strip() not in _WHITE_BG:
+            return True
+    return False
+
+
+_SEG_AI_RE = re.compile(r'\bнейро\b')
+_SEG_DEV_RE = re.compile(r'\b(?:техно|технари|тех[-/ ]бизнес)\b')
+
+def detect_segment_from_doc(other_tags, highlight_classes):
+    """
+    Reads the "Сегмент отправки (...)" header and its "Включаем:" list to figure out
+    which audience this mailing targets.
+
+    The parenthetical note next to the header names the marking convention used in
+    that particular doc:
+      "...оставить белым ненужное"      -> mode='include': highlighted = kept in
+      "...выделить красным исключение"  -> mode='exclude': highlighted = excluded
+    If the doc lists only ONE of Нейро/Технари at all (template trimmed down to the
+    relevant option), that one wins outright — no highlighting needed to disambiguate.
+
+    Returns 'ai', 'dev', or '' (base / no audience restriction) — '' is also the
+    safe fallback whenever the signal is missing or genuinely ambiguous.
+    """
+    mode = None
+    scan_start = 0
+    for i, tag in enumerate(other_tags):
+        text = get_text_content(tag).lower()
+        if 'сегмент' in text and ('отправ' in text or '(' in text):
+            for paren in re.findall(r'\(([^)]*)\)', text):
+                if 'бел' in paren:
+                    mode = 'include'
+                elif 'красн' in paren:
+                    mode = 'exclude'
+            scan_start = i + 1
+            break
+
+    presence_ai = presence_dev = False
+    highlighted_ai = highlighted_dev = False
+    for tag in other_tags[scan_start:scan_start + 12]:
+        if tag.name == 'table':
+            break
+        text = get_text_content(tag).lower()
+        if _SEG_AI_RE.search(text):
+            presence_ai = True
+            highlighted_ai = highlighted_ai or tag_is_highlighted(tag, highlight_classes)
+        elif _SEG_DEV_RE.search(text):
+            presence_dev = True
+            highlighted_dev = highlighted_dev or tag_is_highlighted(tag, highlight_classes)
+
+    if presence_ai and not presence_dev:
+        return 'ai'
+    if presence_dev and not presence_ai:
+        return 'dev'
+    if not presence_ai and not presence_dev:
+        return ''
+
+    if mode == 'include':
+        included_ai, included_dev = highlighted_ai, highlighted_dev
+    elif mode == 'exclude':
+        included_ai, included_dev = not highlighted_ai, not highlighted_dev
+    elif highlighted_ai != highlighted_dev:
+        included_ai, included_dev = highlighted_ai, highlighted_dev
+    else:
+        return ''
+
+    if included_ai and included_dev:
+        return ''
+    if included_ai:
+        return 'ai'
+    if included_dev:
+        return 'dev'
+    return ''
+
+
 def inline_gdoc_formatting(soup):
     """
     Google Docs HTML uses CSS class-based formatting (e.g. .c3 {font-weight:700}).
@@ -1272,6 +1380,7 @@ def parse_doc_html(html_content, ai_hints=None):
     html_content = re.sub(r'\{first[\s_]name\}', '{first_name}', html_content, flags=re.IGNORECASE)
 
     soup = BeautifulSoup(html_content, 'lxml')
+    highlight_classes = extract_highlight_classes(soup)
     inline_gdoc_formatting(soup)
     body = soup.find('body') or soup
     fix_orphan_sups(body)
@@ -1289,7 +1398,6 @@ def parse_doc_html(html_content, ai_hints=None):
     }
     email_subsections = []  # list of {'name': str, 'blocks': []}
     tg_subsections = []     # list of {'name': str, 'blocks': []}
-    include_texts = []      # texts from "Включаем:" meta lines (for segment detection)
 
     current_section = 'other'
     subject = ''
@@ -1352,9 +1460,6 @@ def parse_doc_html(html_content, ai_hints=None):
                     val = re.sub(r'^[-•]\s*', '', m.group(1).strip()).strip()
                     if val:
                         doc_campaign_found = val
-            # Capture "Включаем:" text for segment detection (e.g. "Включаем: нейро")
-            if raw_text.lower().startswith('включаем'):
-                include_texts.append(raw_text)
             return
 
         if section_type == 'email_section':
@@ -1577,17 +1682,11 @@ def parse_doc_html(html_content, ai_hints=None):
     elif not tg_html:
         tg_html = email_html
 
-    # Auto-detect segment from planning metadata (the non-email/non-TG part of the document).
-    # Also include "Включаем: ..." meta lines — they're tagged 'skip' and never reach sections['other'],
-    # but they contain the primary segment signal (e.g. "Включаем: нейро").
-    other_text = ' '.join(t.get_text(strip=True) for t in sections['other']).lower()
-    all_seg_text = other_text + ' ' + ' '.join(include_texts).lower()
-    if re.search(r'\bнейро\b', all_seg_text):
-        segment = 'ai'
-    elif re.search(r'\b(техно|технари|тех[/ ]бизнес)\b', all_seg_text):
-        segment = 'dev'
-    else:
-        segment = ''
+    # Auto-detect segment from the "Сегмент отправки" block, using highlight-color
+    # marking rather than plain keyword search — both "Нейро" and "Технари" are
+    # always present as template text, so only the highlighting tells us which
+    # one(s) are actually selected for this send. See detect_segment_from_doc().
+    segment = detect_segment_from_doc(sections['other'], highlight_classes)
 
     # Auto-detect utm_campaign (тег активности) and date (дата отправки) from planning section.
     # Two doc formats:
