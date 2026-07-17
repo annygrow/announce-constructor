@@ -1315,47 +1315,66 @@ def detect_segment_from_doc(other_tags, highlight_classes):
 
 def inline_gdoc_formatting(soup):
     """
-    Google Docs HTML uses CSS class-based formatting (e.g. .c3 {font-weight:700}).
-    Extract those rules and apply them as inline styles so downstream parsers can detect them.
+    Google Docs HTML uses CSS class-based formatting (e.g. .c3 {font-weight:400}),
+    plus bare tag-selector defaults (e.g. h3{font-weight:700} — the default
+    "Heading 3" weight, which a run's own class only overrides when the author
+    explicitly changed it, e.g. un-bolding one line inside an otherwise-bold
+    heading via font-weight:400/normal).
+    Extract those rules and apply them as inline styles so downstream parsers can
+    detect them — including the EXPLICIT "not bold" case, not just "bold" — without
+    needing to re-parse the <style> block themselves.
     """
     style_tag = soup.find('style')
     if not style_tag:
         return
 
     css_text = style_tag.get_text()
-    bold_cls, italic_cls, center_cls, right_cls = set(), set(), set(), set()
+    bold_cls, normal_cls, italic_cls, center_cls, right_cls = set(), set(), set(), set(), set()
+    bold_tags, normal_tags = set(), set()
 
-    for selector, props in re.findall(r'(\.[\w-]+)\s*\{([^}]+)\}', css_text):
-        cls = selector[1:]
+    for selector, props in re.findall(r'(\.[\w-]+|h[1-6])\s*\{([^}]+)\}', css_text):
         p = props.lower().replace(' ', '')
+        is_class = selector.startswith('.')
+        name = selector[1:] if is_class else selector
         if 'font-weight:700' in p or 'font-weight:bold' in p:
-            bold_cls.add(cls)
-        if 'font-style:italic' in p:
-            italic_cls.add(cls)
-        if 'text-align:center' in p:
-            center_cls.add(cls)
-        if 'text-align:right' in p:
-            right_cls.add(cls)
+            (bold_cls if is_class else bold_tags).add(name)
+        elif 'font-weight:400' in p or 'font-weight:normal' in p:
+            (normal_cls if is_class else normal_tags).add(name)
+        if is_class:
+            if 'font-style:italic' in p:
+                italic_cls.add(name)
+            if 'text-align:center' in p:
+                center_cls.add(name)
+            if 'text-align:right' in p:
+                right_cls.add(name)
 
-    if not (bold_cls or italic_cls or center_cls or right_cls):
+    if not (bold_cls or normal_cls or italic_cls or center_cls or right_cls or bold_tags or normal_tags):
         return
 
     for tag in soup.find_all(True):
         classes = tag.get('class', [])
         if isinstance(classes, str):
             classes = classes.split()
-        if not classes:
-            continue
         existing = tag.get('style', '')
         additions = []
-        if any(c in bold_cls for c in classes) and 'font-weight' not in existing:
-            additions.append('font-weight:700')
-        if any(c in italic_cls for c in classes) and 'font-style' not in existing:
-            additions.append('font-style:italic')
-        if any(c in center_cls for c in classes) and 'text-align' not in existing:
-            additions.append('text-align:center')
-        elif any(c in right_cls for c in classes) and 'text-align' not in existing:
-            additions.append('text-align:right')
+        if 'font-weight' not in existing:
+            # Own class rule wins over the bare tag-name default (CSS specificity);
+            # tag-name default (e.g. h3{font-weight:700}) is the fallback.
+            if any(c in bold_cls for c in classes):
+                additions.append('font-weight:700')
+            elif any(c in normal_cls for c in classes):
+                additions.append('font-weight:400')
+            elif tag.name in bold_tags:
+                additions.append('font-weight:700')
+            elif tag.name in normal_tags:
+                additions.append('font-weight:400')
+        if classes:
+            if any(c in italic_cls for c in classes) and 'font-style' not in existing:
+                additions.append('font-style:italic')
+            if any(c in center_cls for c in classes) and 'text-align' not in existing:
+                additions.append('text-align:center')
+            elif any(c in right_cls for c in classes) and 'text-align' not in existing:
+                additions.append('text-align:right')
         if additions:
             sep = ';' if existing and not existing.endswith(';') else ''
             tag['style'] = existing + sep + ';'.join(additions)
@@ -1827,38 +1846,76 @@ def parse_doc_html(html_content, ai_hints=None):
 
 GC_VAR_RE = re.compile(r'\{[^}]+\}')
 
-def elem_inner_html_for_email(tag, _in_bold=False, link_color='#1445ea'):
+def _style_is_bold(style):
+    """
+    Read an inline CSS `style` string and report what it says about font-weight.
+    Returns:
+      True  — explicitly bold (font-weight:700 / bold)
+      False — explicitly NOT bold (font-weight:400 / normal) — an active override
+      None  — style says nothing about weight either way (inherit from context)
+    Shared by every "Google Doc → channel HTML" converter so bold detection
+    (and, critically, the ability to *cancel* inherited bold) behaves identically
+    across email, TG and Neurocat markdown.
+    """
+    if not style:
+        return None
+    s = style.lower().replace(' ', '')
+    if 'font-weight:700' in s or 'font-weight:bold' in s:
+        return True
+    if 'font-weight:400' in s or 'font-weight:normal' in s:
+        return False
+    return None
+
+def _style_is_italic(style):
+    """True if an inline CSS `style` string explicitly marks italic."""
+    if not style:
+        return False
+    s = style.lower().replace(' ', '')
+    return 'font-style:italic' in s
+
+def elem_inner_html_for_email(tag, _in_bold=False, _wrapped=False, link_color='#1445ea'):
     """
     Convert a BS4 tag's contents to email-safe HTML:
     - keep <b>, <strong>, <i>, <em>, <a href>
     - decode Google redirect URLs
     - preserve GC variables
+
+    _in_bold: whether this text should render bold by default (ambient context).
+    _wrapped: whether a physical <b> tag already encloses this point in the
+              output being assembled (so we don't need to add another one).
+    A span with an explicit font-weight:400/normal override cancels inherited
+    bold for its own subtree, regardless of what the ambient context says.
     """
     parts = []
     for child in tag.children:
         if isinstance(child, NavigableString):
-            parts.append(str(child))
+            text = str(child)
+            if _in_bold and not _wrapped and text.strip():
+                parts.append(f'<b>{text}</b>')
+            else:
+                parts.append(text)
         elif isinstance(child, Tag):
             name = child.name
             if name in ('b', 'strong'):
-                inner = elem_inner_html_for_email(child, _in_bold=True, link_color=link_color)
+                inner = elem_inner_html_for_email(child, _in_bold=True, _wrapped=True, link_color=link_color)
                 parts.append(f'<b>{inner}</b>')
             elif name in ('i', 'em'):
-                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, link_color=link_color)
+                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, _wrapped=_wrapped, link_color=link_color)
                 parts.append(f'<i>{inner}</i>')
             elif name == 'a' and child.get('href'):
-                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, link_color=link_color)
+                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, _wrapped=_wrapped, link_color=link_color)
                 href = decode_google_redirect(child['href'])
                 parts.append(f'<a href="{href}" target="_blank" style="color:{link_color};text-decoration:underline">{inner}</a>')
             elif name == 'sup':
                 pass
             elif name == 'span':
                 style = child.get('style', '')
-                is_bold = ('font-weight:700' in style or 'font-weight: 700' in style
-                           or 'font-weight:bold' in style or 'font-weight: bold' in style)
-                is_italic = 'font-style:italic' in style or 'font-style: italic' in style
-                inner = elem_inner_html_for_email(child, _in_bold=_in_bold or is_bold, link_color=link_color)
-                if is_bold and not _in_bold:
+                bold_state = _style_is_bold(style)
+                eff_bold = _in_bold if bold_state is None else bold_state
+                is_italic = _style_is_italic(style)
+                need_wrap = eff_bold and not _wrapped
+                inner = elem_inner_html_for_email(child, _in_bold=eff_bold, _wrapped=_wrapped or need_wrap, link_color=link_color)
+                if need_wrap:
                     inner = f'<b>{inner}</b>'
                 if is_italic:
                     inner = f'<i>{inner}</i>'
@@ -1868,7 +1925,7 @@ def elem_inner_html_for_email(tag, _in_bold=False, link_color='#1445ea'):
                 if 'display:none' not in br_style:
                     parts.append('<br>')
             else:
-                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, link_color=link_color)
+                inner = elem_inner_html_for_email(child, _in_bold=_in_bold, _wrapped=_wrapped, link_color=link_color)
                 parts.append(inner)
     # Strip trailing <br> tags from parts — Google Docs artifacts at element ends
     while parts and parts[-1] == '<br>':
@@ -2852,45 +2909,75 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
 # TG HTML generation
 # ---------------------------------------------------------------------------
 
-def clean_tag_for_tg(tag, _in_bold=False):
+def _heading_seed_bold(tag):
+    """
+    Default bold state for a heading tag's (h1-h4) own direct content, resolved
+    from its own inline style — set by inline_gdoc_formatting from the doc's
+    <style> block, including bare tag-selector rules like h3{font-weight:700}.
+    Falls back to True (headings render bold by default) when the source
+    document's CSS says nothing about it, e.g. hand-built test HTML with no
+    <style> block, preserving the old blanket-bold behaviour as a safe default.
+    Per-span explicit overrides (font-weight:400/normal) inside the heading
+    still cancel this via clean_tag_for_tg's own tri-state resolution.
+    """
+    state = _style_is_bold(tag.get('style', ''))
+    return True if state is None else state
+
+
+def clean_tag_for_tg(tag, _in_bold=False, _wrapped=False):
     """
     Convert a BS4 tag to TG-compatible HTML:
     Only keep <b>, <i>, <a href="...">, <code>, line breaks.
+
+    _in_bold: whether this text should render bold by default (ambient context —
+              e.g. seeded True for headings whose default weight comes from a
+              bare h1-h4 CSS rule rather than an explicit span/class override).
+    _wrapped: whether a physical <b> tag already encloses this point in the
+              output being assembled, so we don't add a redundant nested one.
+    A span with an explicit font-weight:400/normal override cancels inherited
+    bold for its own subtree, regardless of what the ambient context says —
+    this is what lets a heading with a bold headline + a deliberately
+    non-bold second line come out correctly instead of both lines bold.
     """
     parts = []
     for child in tag.children:
         if isinstance(child, NavigableString):
-            parts.append(str(child))
+            text = str(child)
+            if _in_bold and not _wrapped and text.strip():
+                parts.append(f'<b>{text}</b>')
+            else:
+                parts.append(text)
         elif isinstance(child, Tag):
             name = child.name
             if name in ('b', 'strong'):
-                inner = clean_tag_for_tg(child, _in_bold=True)
+                inner = clean_tag_for_tg(child, _in_bold=True, _wrapped=True)
                 parts.append(f'<b>{inner}</b>')
             elif name in ('i', 'em'):
-                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold, _wrapped=_wrapped)
                 parts.append(f'<i>{inner}</i>')
             elif name == 'u':
-                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold, _wrapped=_wrapped)
                 parts.append(f'<u>{inner}</u>')
             elif name == 's':
-                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold, _wrapped=_wrapped)
                 parts.append(f'<s>{inner}</s>')
             elif name == 'code':
-                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold, _wrapped=_wrapped)
                 parts.append(f'<code>{inner}</code>')
             elif name == 'a' and child.get('href'):
-                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold, _wrapped=_wrapped)
                 href = decode_google_redirect(child['href'])
                 parts.append(f'<a href="{href}">{inner}</a>')
             elif name == 'sup':
                 pass
             elif name == 'span':
                 style = child.get('style', '')
-                is_bold = ('font-weight:700' in style or 'font-weight: 700' in style
-                           or 'font-weight:bold' in style or 'font-weight: bold' in style)
-                is_italic = 'font-style:italic' in style or 'font-style: italic' in style
-                inner = clean_tag_for_tg(child, _in_bold=_in_bold or is_bold)
-                if is_bold and not _in_bold:
+                bold_state = _style_is_bold(style)
+                eff_bold = _in_bold if bold_state is None else bold_state
+                is_italic = _style_is_italic(style)
+                need_wrap = eff_bold and not _wrapped
+                inner = clean_tag_for_tg(child, _in_bold=eff_bold, _wrapped=_wrapped or need_wrap)
+                if need_wrap:
                     inner = f'<b>{inner}</b>'
                 if is_italic:
                     inner = f'<i>{inner}</i>'
@@ -2898,7 +2985,7 @@ def clean_tag_for_tg(tag, _in_bold=False):
             elif name == 'br':
                 parts.append('\n')
             else:
-                inner = clean_tag_for_tg(child, _in_bold=_in_bold)
+                inner = clean_tag_for_tg(child, _in_bold=_in_bold, _wrapped=_wrapped)
                 parts.append(inner)
     return ''.join(parts)
 
@@ -2951,22 +3038,32 @@ def _md_wrap(marker, inner):
     return f'{leading}{marker}{stripped}{marker}{tail_punct}{trailing}'
 
 
-def clean_tag_for_tg_markdown(tag, links_collector, _in_bold=False):
+def clean_tag_for_tg_markdown(tag, links_collector, _in_bold=False, _wrapped=False):
     """
     Convert a BS4 tag to Markdown: **bold**, *italic*.
     Link URLs are appended to links_collector; link text is kept as plain text.
+
+    _in_bold: whether this text should render bold by default (ambient context).
+    _wrapped: whether a physical ** marker already encloses this point in the
+              output being assembled, so we don't add a redundant nested one.
+    A span with an explicit font-weight:400/normal override cancels inherited
+    bold for its own subtree, regardless of what the ambient context says.
     """
     parts = []
     for child in tag.children:
         if isinstance(child, NavigableString):
-            parts.append(str(child))
+            text = str(child)
+            if _in_bold and not _wrapped and text.strip():
+                parts.append(_md_wrap('**', text))
+            else:
+                parts.append(text)
         elif isinstance(child, Tag):
             name = child.name
             if name in ('b', 'strong'):
-                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=True)
-                parts.append(_md_wrap('**', inner) if not _in_bold else inner)
+                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=True, _wrapped=True)
+                parts.append(_md_wrap('**', inner) if not _wrapped else inner)
             elif name in ('i', 'em'):
-                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold)
+                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold, _wrapped=_wrapped)
                 parts.append(_md_wrap('*', inner))
             elif name == 'a' and child.get('href'):
                 href = decode_google_redirect(child['href'])
@@ -2976,12 +3073,13 @@ def clean_tag_for_tg_markdown(tag, links_collector, _in_bold=False):
             elif name == 'sup':
                 pass
             elif name == 'span':
-                style    = child.get('style', '')
-                is_bold  = ('font-weight:700' in style or 'font-weight: 700' in style
-                            or 'font-weight:bold' in style or 'font-weight: bold' in style)
-                is_italic = 'font-style:italic' in style or 'font-style: italic' in style
-                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold or is_bold)
-                if is_bold and not _in_bold:
+                style = child.get('style', '')
+                bold_state = _style_is_bold(style)
+                eff_bold = _in_bold if bold_state is None else bold_state
+                is_italic = _style_is_italic(style)
+                need_wrap = eff_bold and not _wrapped
+                inner = clean_tag_for_tg_markdown(child, links_collector, _in_bold=eff_bold, _wrapped=_wrapped or need_wrap)
+                if need_wrap:
                     inner = _md_wrap('**', inner)
                 if is_italic:
                     inner = _md_wrap('*', inner)
@@ -2989,7 +3087,7 @@ def clean_tag_for_tg_markdown(tag, links_collector, _in_bold=False):
             elif name == 'br':
                 parts.append('\n')
             else:
-                parts.append(clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold))
+                parts.append(clean_tag_for_tg_markdown(child, links_collector, _in_bold=_in_bold, _wrapped=_wrapped))
     return ''.join(parts)
 
 
@@ -3039,7 +3137,15 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
                     result_parts.append(link_text)
             continue
 
-        inner = _postprocess_md(clean_tag_for_tg_markdown(tag, raw_links).strip())
+        if tag.name in ('h1', 'h2', 'h3', 'h4'):
+            # Seed bold from the heading's own resolved default instead of
+            # blanket-wrapping the whole heading text — see generate_tg_html for
+            # the full rationale (a deliberately non-bold second line must stay
+            # non-bold instead of getting swept into one big ** run).
+            raw_inner = clean_tag_for_tg_markdown(tag, raw_links, _in_bold=_heading_seed_bold(tag))
+        else:
+            raw_inner = clean_tag_for_tg_markdown(tag, raw_links)
+        inner = _postprocess_md(raw_inner.strip())
         if not inner:
             continue
         inner = re.sub(r'\*{0,2}\s*ссылка:\s*([^\s*\w]*)\s*\*{0,2}\s*', r'\1', inner, flags=re.IGNORECASE).strip()
@@ -3052,27 +3158,28 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
             # punct OUTSIDE closing ** (from _md_wrap moving trailing punct out of bold)
             # e.g. **{first_name}**, привет → Привет
             inner = re.sub(
-                r'\*\*\s*\{first_name\}\s*\*\*[,!?.;:\-–—]\s*([а-яёa-z])',
+                r'\*\*[ \t\xa0]*\{first_name\}[ \t\xa0]*\*\*[,!?.;:\-–—]\s*([а-яёa-z])',
                 lambda m: m.group(1).upper(), inner
             )
-            inner = re.sub(r'\*\*\s*\{first_name\}\s*\*\*[,!?.;:\-–—]\s*', '', inner)
+            inner = re.sub(r'\*\*[ \t\xa0]*\{first_name\}[ \t\xa0]*\*\*[,!?.;:\-–—]\s*', '', inner)
             # ", **{first_name}**" — variable is bold, comma is outside the bold markers
             # e.g. "Привет, **{first_name}**. Я Павел" → "Привет. Я Павел"
-            inner = re.sub(r'\s*,\s*\*\*\{first_name\}\*\*', '', inner)
+            inner = re.sub(r'[ \t\xa0]*,[ \t\xa0]*\*\*\{first_name\}\*\*', '', inner)
             # "**{first_name}[punct] " — variable at start of bold block
             # If followed by lowercase letter, remove and capitalize it
+            # (uses [ \t\xa0]* rather than \s* right after ** so a heading's CLOSING
+            # ** followed on the next line by a non-bold {first_name} run — a real
+            # doc pattern once headings can have a bold headline + non-bold body —
+            # is never mistaken for an OPENING ** around the variable.)
             inner = re.sub(
-                r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*\*\*\s*([а-яёa-z])',
+                r'\*\*[ \t\xa0]*\{first_name\}[,!?.;:\-–—]?[ \t\xa0]*\*\*\s*([а-яёa-z])',
                 lambda m: m.group(1).upper(), inner
             )
-            inner = re.sub(r'\*\*\s*\{first_name\}[,!?.;:\-–—]?\s*', '**', inner)
+            inner = re.sub(r'\*\*[ \t\xa0]*\{first_name\}[,!?.;:\-–—]?[ \t\xa0]*', '**', inner)
             inner = _strip_first_name(inner)
             inner = re.sub(r'\*{4,}', '', inner).strip()  # clean up empty **..** remnants
         if not inner:
             continue
-
-        if tag.name in ('h1', 'h2', 'h3', 'h4'):
-            inner = f'**{inner}**'
 
         # When a paragraph starts with emoji then **, move the emoji inside the bold markers
         # so ** is at position 0. Neurocat renders **🔥 text** correctly but not 🔥 **text**.
@@ -3174,7 +3281,15 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
                     result_parts.append(f'<p><a href="{href}">{link_inner}</a></p>')
             continue
 
-        inner = clean_tag_for_tg(tag).strip()
+        if tag.name in ('h1', 'h2', 'h3', 'h4'):
+            # Seed bold from the heading's own resolved default (usually True —
+            # GDocs headings are bold by default) rather than blanket-wrapping the
+            # whole heading text: a span that explicitly overrides to
+            # font-weight:400/normal (e.g. a deliberately non-bold second line)
+            # must stay non-bold instead of getting swept up in one big <b>.
+            inner = clean_tag_for_tg(tag, _in_bold=_heading_seed_bold(tag)).strip()
+        else:
+            inner = clean_tag_for_tg(tag).strip()
         if not inner:
             continue  # empty paragraphs skipped — spacers added uniformly below
         # Remove empty formatting spans BEFORE splitting — Google Docs exports e.g.
@@ -3197,9 +3312,6 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
             r'<b><a href="\2">\1</a></b>',
             inner
         )
-
-        if tag.name in ('h1', 'h2', 'h3', 'h4'):
-            inner = f'<b>{inner}</b>'
 
         # Split at soft returns (\n from <br> or Shift+Enter) and keep as ONE <p> with <br>
         # separators — spacers must not appear between list items.
@@ -3327,7 +3439,11 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
                     result_parts.append(f'<a href="{href}">{link_inner}</a>')
             continue
 
-        inner = clean_tag_for_tg(tag).strip()
+        if tag.name in ('h1', 'h2', 'h3', 'h4'):
+            # See generate_tg_html for why we seed bold instead of blanket-wrapping.
+            inner = clean_tag_for_tg(tag, _in_bold=_heading_seed_bold(tag)).strip()
+        else:
+            inner = clean_tag_for_tg(tag).strip()
         if not inner:
             continue
         # Same empty-span cleanup as in generate_tg_html (see comment there)
@@ -3343,9 +3459,6 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
             r'<b><a href="\2">\1</a></b>',
             inner
         )
-
-        if tag.name in ('h1', 'h2', 'h3', 'h4'):
-            inner = f'<b>{inner}</b>'
 
         # Split soft-return (<br>) lines and keep as ONE entry joined with \n
         # so list items stay compact (no blank line between them in the output).
