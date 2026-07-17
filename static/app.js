@@ -63,7 +63,7 @@ const BLOCK_LABELS = {
   block_grey:           'Серый',
   block_dotted:         'Пунктирный',
   block_blue_cta:       'Синий CTA',
-  block_blue_text:      'Синий текст',
+  block_blue_text:      'Синий',
   block_button:         'Кнопка',
   block_spacer:         'Отступ',
   block_image:          'Картинка',
@@ -623,11 +623,28 @@ function deleteBlock(channelKey, idx) {
   _restoreUiState(channelKey, state, i => i < idx ? i : i + 1);
 }
 
+const _BLUE_BLOCK_TYPES = ['block_blue_cta', 'block_blue_text'];
+
+// Swaps the baked-in inline text/link colors so paragraphs stay readable
+// when a block is switched to/from a blue background via the type dropdown.
+function _recolorParasForBlueToggle(html, toBlue) {
+  if (!html) return html;
+  return toBlue
+    ? html.replace(/color:#333333/g, 'color:#ffffff').replace(/color:#1445ea/g, 'color:#e1fb52')
+    : html.replace(/color:#ffffff/g, 'color:#333333').replace(/color:#e1fb52/g, 'color:#1445ea');
+}
+
 function changeBlockType(channelKey, idx, newType) {
   const blocks = emailBlocks[channelKey];
   if (!blocks || !blocks[idx]) return;
   const state = _captureUiState(channelKey);
-  blocks[idx].type = newType;
+  const block = blocks[idx];
+  const wasBlue = _BLUE_BLOCK_TYPES.includes(block.type);
+  const willBeBlue = _BLUE_BLOCK_TYPES.includes(newType);
+  if (wasBlue !== willBeBlue) {
+    block.paragraphs_html = _recolorParasForBlueToggle(block.paragraphs_html, willBeBlue);
+  }
+  block.type = newType;
   renderBlockEditorForPanel(channelKey);
   reassembleEmail(channelKey);
   _restoreUiState(channelKey, state);

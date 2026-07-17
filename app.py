@@ -1033,6 +1033,37 @@ def _get_trailing_tg_label(tag):
     return (post_text.strip(), pre_tag)
 
 
+def _extract_residual_media(tag):
+    """
+    Meta-line paragraphs like "Тема: ..." / "Прехедер: ..." are normally
+    consumed entirely (their text is captured into subject/preview and the
+    paragraph itself is discarded). But sometimes an image is glued to the
+    same paragraph as a sibling <span> (e.g. Google Docs export shape:
+    <p><span>Прехедер: ...text...</span><span><img/></span></p>), with no
+    blank paragraph separating them. In that case the image must not be
+    thrown away with the rest of the meta line.
+
+    Returns a copy of `tag` containing only the child nodes that carry an
+    <img> (dropping the text-only/label children), or None if the tag has
+    no image at all.
+    """
+    if not tag.find('img'):
+        return None
+    tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+    if not tag_copy:
+        return None
+    kept_any = False
+    for child in list(tag_copy.children):
+        if hasattr(child, 'find') and child.find('img'):
+            kept_any = True
+            continue
+        if hasattr(child, 'extract'):
+            child.extract()
+        # bare NavigableString children (stray whitespace) are left as-is;
+        # they carry no image and are harmless if kept.
+    return tag_copy if kept_any else None
+
+
 def extract_footnotes(soup):
     """
     Extract footnote links from a Google Docs HTML export.
@@ -1408,6 +1439,15 @@ def parse_doc_html(html_content, ai_hints=None):
     def process_block(tag):
         nonlocal current_section, subject, preview, sender, doc_campaign_found
 
+        def _route(t):
+            """Add a content tag to whichever section is currently open."""
+            if current_section == 'tg_section' and tg_subsections:
+                tg_subsections[-1]['blocks'].append(t)
+            elif current_section == 'email_section' and email_subsections:
+                email_subsections[-1]['blocks'].append(t)
+            else:
+                sections['other'].append(t)
+
         # Handle merged paragraph: body content + section label (e.g. "Другие источники")
         # in the same <p>, separated by <br/> tags.  Split them before any other detection
         # so that the CTA button stays in the current email section and the label correctly
@@ -1528,12 +1568,21 @@ def parse_doc_html(html_content, ai_hints=None):
             extracted = re.sub(r'^[^:]+\s*:\s*', '', raw, count=1).strip()
             if extracted and not subject:
                 subject = extracted
-            return  # consumed, don't add to any section
+            # The label text is consumed, but if an image is glued to the same
+            # paragraph (no blank line between "Тема: ..." and the picture),
+            # don't throw it away with the rest of the meta line.
+            residual = _extract_residual_media(tag)
+            if residual is not None:
+                _route(residual)
+            return
         if section_type == 'preview':
             raw = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
             extracted = re.sub(r'^[^:]+\s*:\s*', '', raw, count=1).strip()
             if extracted and not preview:
                 preview = extracted
+            residual = _extract_residual_media(tag)
+            if residual is not None:
+                _route(residual)
             return
 
         # Also detect inline subject/preview in the 'other' or 'email_section' when
@@ -1548,20 +1597,21 @@ def parse_doc_html(html_content, ai_hints=None):
                 if not subject:
                     raw0 = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
                     subject = re.sub(r'^[^:]+\s*:\s*', '', raw0, count=1).strip()
+                residual = _extract_residual_media(tag)
+                if residual is not None:
+                    _route(residual)
                 return
         if not preview:
             for kw in ['превью:', 'прехедер:', 'preview:', 'preheader:']:
                 if txt_lower.startswith(kw):
                     raw0 = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
                     preview = re.sub(r'^[^:]+\s*:\s*', '', raw0, count=1).strip()
+                    residual = _extract_residual_media(tag)
+                    if residual is not None:
+                        _route(residual)
                     return
 
-        if current_section == 'tg_section' and tg_subsections:
-            tg_subsections[-1]['blocks'].append(tag)
-        elif current_section == 'email_section' and email_subsections:
-            email_subsections[-1]['blocks'].append(tag)
-        else:
-            sections['other'].append(tag)
+        _route(tag)
 
     def walk_blocks(parent):
         """Walk direct block children; for ul/ol peek inside for section-header li items."""
@@ -2525,9 +2575,30 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 has_inner_text = bool(inner and any(
                     not _BTN_BRACKET_RE.match(_strip_trailing_footnotes(t.get_text(strip=True))) for t in inner))
 
+                # A lone pending image (empty-text <p> wrapping an <img>, queued by the
+                # 'p' branch below while it waits for following text to merge into) should
+                # not be flushed alone just because the next sibling happens to be a table
+                # instead of a plain <p>. If the table has plain body text and no button,
+                # merge the pending image with the table's content into one block_image_text
+                # — mirrors the has_inner_btn merge case just below, for the text case.
+                pending_is_lone_image = (
+                    len(pending_tags) == 1
+                    and pending_tags[0].name == 'p'
+                    and not pending_tags[0].get_text(strip=True).replace('\xa0', '').strip()
+                    and bool(pending_tags[0].find('img'))
+                )
+
                 if has_inner_btn and pending_tags and not has_inner_text:
                     # Table has ONLY buttons (no body text of its own) —
                     # merge pre-table paragraphs into the CTA block
+                    combined = list(pending_tags) + inner
+                    pending_tags.clear()
+                    row, meta = render_block_from_tags(combined, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
+                    if row:
+                        raw_blocks.append((row, meta))
+                elif pending_is_lone_image and not has_inner_btn and inner:
+                    # Table has plain body text, no button — merge the lone pending image
+                    # with the table's paragraphs into a single block_image_text.
                     combined = list(pending_tags) + inner
                     pending_tags.clear()
                     row, meta = render_block_from_tags(combined, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
