@@ -1939,11 +1939,12 @@ def _strip_first_name(text):
     """Remove {first_name} GC variable with smart punctuation/capitalization cleanup.
 
     Handles patterns like:
-      'Привет, {first_name}!'       → 'Привет!'
-      '{first_name}, привет!'       → 'Привет!'
-      '{first_name}! Текст'         → 'Текст'
-      'Привет {first_name}!'        → 'Привет!'
-      '<b>{first_name}, текст</b>'  → '<b>Текст</b>'
+      'Привет, {first_name}!'          → 'Привет!'
+      '{first_name}, привет!'          → 'Привет!'
+      '{first_name}! Текст'            → 'Текст'
+      'Привет {first_name}!'           → 'Привет!'
+      '<b>{first_name}, текст</b>'     → '<b>Текст</b>'
+      'Строка1\\n{first_name}, текст'   → 'Строка1\\nТекст'  (start of a new line, not just start of string)
     """
     text = text.replace('\xa0', ' ')
 
@@ -1959,19 +1960,28 @@ def _strip_first_name(text):
             flags=re.UNICODE
         )
 
-    # {first_name} right after opening tag(s) at start: <b>{first_name}, текст → <b>Текст
-    text, n = re.subn(
-        r'^((?:\s*<(?:b|i|em|strong|span|u|s)[^>]*>)+)\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*',
-        r'\1', text
-    )
-    if n:
-        text = _cap(text)
-
-    # {first_name} at bare start + optional separator → remove and capitalize what follows
-    if not n:
-        text, n = re.subn(r'^\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*', '', text)
+    def _strip_line_start(line):
+        # {first_name} right after opening tag(s) at line start: <b>{first_name}, текст → <b>Текст
+        line, n = re.subn(
+            r'^((?:\s*<(?:b|i|em|strong|span|u|s)[^>]*>)+)\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*',
+            r'\1', line
+        )
         if n:
-            text = _cap(text)
+            return _cap(line)
+
+        # {first_name} at bare line start + optional separator → remove and capitalize what follows
+        line, n = re.subn(r'^\s*' + _FIRST_NAME_VAR + r'\s*[,!?.;:\-–—]?\s*', '', line)
+        if n:
+            return _cap(line)
+
+        return line
+
+    # Apply the "start" handling per line — {first_name} that opens a new line (right
+    # after \n, e.g. a heading's non-bold second line in Нейрокот) is a line/sentence
+    # start just like {first_name} at the very start of the whole string, and should get
+    # the same capitalization treatment. Occurrences mid-line are untouched here and fall
+    # through to the mid-sentence patterns below.
+    text = '\n'.join(_strip_line_start(line) for line in text.split('\n'))
 
     # ", {first_name}" in the middle → remove comma + variable, preserve following punctuation
     text = re.sub(r'\s*,\s*' + _FIRST_NAME_VAR, '', text)
