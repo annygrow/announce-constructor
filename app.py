@@ -804,6 +804,26 @@ def is_section_header(tag, ai_hints=None):
     if _first_word_alpha in {'телеграм', 'telegram', 'тг', 'tg', 'бот', 'bot'} and text != _first_word_alpha:
         return 'tg_section'
 
+    # Meta-content labels: skip entirely (neither section header nor content).
+    # Must run BEFORE the length guard below: Google Docs sometimes collapses the
+    # blank line between two meta lines (e.g. "от кого: ..." + "Тема: ...") into a
+    # single over-120-char paragraph via <br><br> nested inside one <p>, instead of
+    # emitting two separate short <p> tags. These are startswith checks anchored at
+    # the beginning of the text, so it's safe to run them regardless of how long the
+    # rest of the (possibly glued-on) paragraph turns out to be.
+    meta_label_kw = ['от лица ', 'от лица:', 'в 1 клик', 'в 2 клик', 'в один клик',
+                     'обычная рассылка', 'ссылки:', 'список ссылок']
+    if any(text.startswith(kw) for kw in meta_label_kw):
+        return 'skip'
+    if text in ('ссылки',):
+        return 'skip'
+
+    meta_kw = ['кампания:', 'каналы ', 'каналы(', 'сегмент ', 'сегмент(',
+               'исключаем', 'включаем', 'от кого:', 'from:', 'отправитель:']
+    # Skip meta-section headers (campaign, channels, segments, sender info)
+    if any(text.startswith(kw) or text == kw.rstrip(':') for kw in meta_kw):
+        return 'skip'
+
     # Section headers are short labels, not body sentences
     if len(text) > 120:
         return None
@@ -838,20 +858,6 @@ def is_section_header(tag, ai_hints=None):
     tg_only_kw = ['телеграм:', 'telegram:']
     subject_kw = ['тема письма', 'тема:', 'темы:', 'subject:']
     preview_kw = ['превью:', 'прехедер:', 'прехендер:', 'preview:', 'preheader:', 'preheader :', 'прехэдер:']
-    meta_kw = ['кампания:', 'каналы ', 'каналы(', 'сегмент ', 'сегмент(',
-               'исключаем', 'включаем', 'от кого:', 'from:', 'отправитель:']
-
-    # Meta-content labels: skip entirely (neither section header nor content)
-    meta_label_kw = ['от лица ', 'от лица:', 'в 1 клик', 'в 2 клик', 'в один клик',
-                     'обычная рассылка', 'ссылки:', 'список ссылок']
-    if any(text.startswith(kw) for kw in meta_label_kw):
-        return 'skip'
-    if text in ('ссылки',):
-        return 'skip'
-
-    # Skip meta-section headers (campaign, channels, segments, sender info)
-    if any(text.startswith(kw) or text == kw.rstrip(':') for kw in meta_kw):
-        return 'skip'
 
     # Standalone email section headers — exact match
     email_exact = {'почта', 'письмо', 'e-mail', 'email', 'почта гк', 'email гк', 'почта (гк)', 'mail'}
@@ -922,56 +928,64 @@ def _get_trailing_email_label(tag):
 
     children = list(tag.children)
 
-    # Find the index of the LAST direct child that contains a <br/>
+    def _match_label(candidate_children):
+        """Return the label text if candidate_children's text starts with a
+        recognized label keyword and passes the length guard, else None."""
+        text = ''.join(
+            c.get_text() if hasattr(c, 'get_text') else str(c)
+            for c in candidate_children
+        ).strip()
+        text_lower = text.lower()
+        if not any(text_lower.startswith(kw) for kw in other_src_kw):
+            return None
+        # Label must be short (it's a heading, not body content)
+        if len(text) > 60:
+            return None
+        return text
+
+    # Candidate 1: split right after the LAST direct child that contains a <br/>
+    # anywhere in it (the common shape: "...content...<br/><br/>Label", label in
+    # its own following span with no <br/> of its own).
     last_br_child_idx = -1
     for i, child in enumerate(children):
         if hasattr(child, 'find') and child.find('br'):
             last_br_child_idx = i
 
-    if last_br_child_idx < 0:
-        return None
+    split_idx = None
+    post_text = None
+    if last_br_child_idx >= 0:
+        post_text = _match_label(children[last_br_child_idx + 1:])
+        if post_text is not None:
+            split_idx = last_br_child_idx + 1
 
-    # Collect text from children AFTER the <br/>-containing child
-    post_children = children[last_br_child_idx + 1:]
-    post_text = ''.join(
-        c.get_text() if hasattr(c, 'get_text') else str(c)
-        for c in post_children
-    ).strip()
-    post_lower = post_text.lower()
+    # Candidate 2 (fallback): the label span itself carries its own trailing
+    # <br/> artifact (a common Google Docs export quirk), so it matched the
+    # <br/> scan above and became the "separator" itself, leaving nothing after
+    # it to treat as the label. Retry with the very last child in isolation.
+    if split_idx is None and len(children) >= 2:
+        post_text = _match_label(children[-1:])
+        if post_text is not None:
+            split_idx = len(children) - 1
 
-    matched_kw = None
-    for kw in other_src_kw:
-        if post_lower.startswith(kw):
-            matched_kw = kw
-            break
-
-    if not matched_kw:
-        return None
-
-    # Label must be short (it's a heading, not body content)
-    if len(post_text) > 60:
+    if split_idx is None:
         return None
 
     # Require non-empty content BEFORE the label
     pre_text = ''.join(
         c.get_text() if hasattr(c, 'get_text') else str(c)
-        for c in children[:last_br_child_idx]
+        for c in children[:split_idx]
     ).strip()
     if not pre_text:
         return None
 
-    # Build a copy of the tag with only the pre-label content
+    # Build a copy of the tag with only the pre-label content, cut at the same
+    # child index (re-parsing the same serialized string yields identical
+    # child structure/order).
     pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
     if pre_tag:
         pre_children_copy = list(pre_tag.children)
-        # Re-locate the last <br/>-containing child in the copy
-        last_br_idx_copy = -1
-        for i, child in enumerate(pre_children_copy):
-            if hasattr(child, 'find') and child.find('br'):
-                last_br_idx_copy = i
-        if last_br_idx_copy >= 0:
-            for child in pre_children_copy[last_br_idx_copy:]:
-                child.extract()
+        for child in pre_children_copy[split_idx:]:
+            child.extract()
 
     return (post_text.strip(), pre_tag)
 
@@ -991,44 +1005,62 @@ def _get_trailing_tg_label(tag):
 
     children = list(tag.children)
 
+    def _match_label(candidate_children):
+        """Return the label text if candidate_children's text matches the TG
+        bot-label pattern and passes the length guard, else None."""
+        text = ''.join(
+            c.get_text() if hasattr(c, 'get_text') else str(c)
+            for c in candidate_children
+        ).strip()
+        if not re.match(r'^бот\s*\(', text.lower()):
+            return None
+        if len(text) > 60:
+            return None
+        return text
+
+    # Candidate 1: split right after the LAST direct child that contains a <br/>
+    # anywhere in it (the common shape: "...content...<br/>Label", label in its
+    # own following span with no <br/> of its own).
     last_br_child_idx = -1
     for i, child in enumerate(children):
         if hasattr(child, 'find') and child.find('br'):
             last_br_child_idx = i
 
-    if last_br_child_idx < 0:
-        return None
+    split_idx = None
+    post_text = None
+    if last_br_child_idx >= 0:
+        post_text = _match_label(children[last_br_child_idx + 1:])
+        if post_text is not None:
+            split_idx = last_br_child_idx + 1
 
-    post_children = children[last_br_child_idx + 1:]
-    post_text = ''.join(
-        c.get_text() if hasattr(c, 'get_text') else str(c)
-        for c in post_children
-    ).strip()
-    post_lower = post_text.lower()
+    # Candidate 2 (fallback): the label span itself carries its own trailing
+    # <br/> artifact (a common Google Docs export quirk, e.g. "БОТ (общий)<br/>"
+    # as the very last span), so it matched the <br/> scan above and became the
+    # "separator" itself, leaving nothing after it to treat as the label. Retry
+    # with the very last child in isolation.
+    if split_idx is None and len(children) >= 2:
+        post_text = _match_label(children[-1:])
+        if post_text is not None:
+            split_idx = len(children) - 1
 
-    if not re.match(r'^бот\s*\(', post_lower):
-        return None
-
-    if len(post_text) > 60:
+    if split_idx is None:
         return None
 
     pre_text = ''.join(
         c.get_text() if hasattr(c, 'get_text') else str(c)
-        for c in children[:last_br_child_idx]
+        for c in children[:split_idx]
     ).strip()
     if not pre_text:
         return None
 
+    # Build a copy of the tag with only the pre-label content, cut at the same
+    # child index (re-parsing the same serialized string yields identical
+    # child structure/order).
     pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
     if pre_tag:
         pre_children_copy = list(pre_tag.children)
-        last_br_idx_copy = -1
-        for i, child in enumerate(pre_children_copy):
-            if hasattr(child, 'find') and child.find('br'):
-                last_br_idx_copy = i
-        if last_br_idx_copy >= 0:
-            for child in pre_children_copy[last_br_idx_copy:]:
-                child.extract()
+        for child in pre_children_copy[split_idx:]:
+            child.extract()
 
     return (post_text.strip(), pre_tag)
 
@@ -1504,11 +1536,20 @@ def parse_doc_html(html_content, ai_hints=None):
 
         if section_type == 'skip':
             raw_text = get_text_content(tag).strip()
-            # Capture sender name from "от кого: ..." / "отправитель: ..." meta line before discarding
+            # Same text, but joined with an empty separator between spans instead of a
+            # space — avoids "Тем"+"а" (a word Google Docs split across two spans, e.g.
+            # for spellcheck) turning into "Тем а" and breaking the "тема:" match below.
+            tight_text = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+            # Capture sender name from "от кого: ..." / "отправитель: ..." meta line before discarding.
             if not sender:
-                m = re.match(r'^(?:от\s+кого|отправитель)\s*[:\s]\s*(.+)', raw_text, re.IGNORECASE)
+                m = re.match(r'^(?:от\s+кого|отправитель)\s*[:\s]\s*(.+)', tight_text, re.IGNORECASE)
                 if m:
                     val = m.group(1).strip()
+                    # Google Docs sometimes collapses the blank line between "от кого: ..."
+                    # and the next meta line (e.g. "Тема: ...") into this same paragraph via
+                    # <br><br>, instead of a separate <p> — trim any such glued-on tail so it
+                    # doesn't end up as part of the sender name.
+                    val = re.sub(r'\s*тема(?:\s+письма)?\s*:.*$', '', val, flags=re.IGNORECASE).strip()
                     if 'зерокодер' not in val.lower():
                         val = val + ' из Зерокодера'
                     sender = val
@@ -1519,6 +1560,13 @@ def parse_doc_html(html_content, ai_hints=None):
                     val = re.sub(r'^[-•]\s*', '', m.group(1).strip()).strip()
                     if val:
                         doc_campaign_found = val
+            # Recover a "Тема: ..." subject line glued into this same meta paragraph
+            # (see comment above) — otherwise it would be silently dropped along with
+            # the rest of the discarded "от кого:"/meta content.
+            if not subject:
+                m = re.search(r'тема(?:\s+письма)?\s*:\s*(.+)', tight_text, re.IGNORECASE)
+                if m:
+                    subject = m.group(1).strip()
             return
 
         if section_type == 'email_section':
@@ -1927,9 +1975,15 @@ def elem_inner_html_for_email(tag, _in_bold=False, _wrapped=False, link_color='#
             else:
                 inner = elem_inner_html_for_email(child, _in_bold=_in_bold, _wrapped=_wrapped, link_color=link_color)
                 parts.append(inner)
-    # Strip trailing <br> tags from parts — Google Docs artifacts at element ends
-    while parts and parts[-1] == '<br>':
-        parts.pop()
+    # NOTE: trailing <br> stripping used to happen right here, per recursion level
+    # (i.e. per span/b/i/a node). That's wrong: Google Docs sometimes splits a
+    # single blank-line break across two adjacent SIBLING spans, one <br> each
+    # (e.g. "...👋<br>" then a separate "<br>" span before the next real content).
+    # Stripping per-node treats each of those spans as if it were the tail of the
+    # whole paragraph, deleting both breaks even though real text follows later in
+    # the parent's sibling list — gluing the two lines together with no separator.
+    # The real "trailing junk <br> at the true end of the paragraph" cleanup now
+    # happens once, on the fully assembled string, in tag_to_email_p().
     return ''.join(parts)
 
 # Matches {first_name} GC variable (plain text, not inside HTML tags)
@@ -2010,9 +2064,15 @@ def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18,
         return None
     inner = elem_inner_html_for_email(tag, link_color=link_color)
     inner = inner.strip()
-    # Strip leading/trailing <br> tags — Google Docs artifacts at paragraph boundaries
+    # Strip leading/trailing <br> tags — Google Docs artifacts at paragraph boundaries.
+    # This is where trailing-<br> cleanup happens now (once, on the fully assembled
+    # string) instead of per recursion level inside elem_inner_html_for_email() — see
+    # the comment there. The trailing pattern also allows the <br> run to be followed
+    # by closing inline tags before the true end of the string (e.g. "...text<br><br></b>"),
+    # since a trailing junk <br> is often still wrapped in the last <b>/<i>/<a> of the
+    # paragraph rather than sitting bare at the very end.
     inner = re.sub(r"^(\s*<br\s*/?>\s*)+", "", inner)
-    inner = re.sub(r"(\s*<br\s*/?>\s*)+$", "", inner)
+    inner = re.sub(r"(?:<br\s*/?>\s*)+(?=(?:</[a-zA-Z]+>\s*)*$)", "", inner)
     # Strip <br> that appears right after opening inline tag(s): <i><br/>text → <i>text
     inner = re.sub(r"^((?:\s*<(?:b|i|em|strong|span|u|s|a)[^>]*>\s*)+)<br\s*/?>", r"\1", inner)
     inner = inner.strip()
@@ -3289,6 +3349,64 @@ def generate_tg_markdown(tg_section_html, channel_key, campaign, date, segment='
 
     return text, utm_links
 
+
+def _strip_empty_format_tags(inner):
+    """
+    Remove formatting tags (<b>/<i>/<u>/<s>) whose content is only whitespace —
+    a Google Docs export artifact, e.g. <span style="font-weight:700"><br/></span>
+    becomes <b>\\n</b> after clean_tag_for_tg(), which would otherwise leave a
+    stray unbalanced tag once the surrounding text is split on '\\n'.
+
+    Tags that contain 2+ consecutive newlines are deliberately left untouched:
+    a double line break is how a real paragraph break shows up here when Google
+    Docs collapses a blank line into the same <p> instead of emitting a separate
+    empty one (see _split_tg_paragraph_groups) — stripping it would silently
+    glue two logical paragraphs together with no separator at all.
+    """
+    def _repl(m):
+        whitespace = m.group(2)
+        if whitespace.count('\n') >= 2:
+            return m.group(0)
+        return ''
+    return re.sub(r'<(b|i|u|s)>(\s*)</\1>', _repl, inner)
+
+
+def _split_tg_paragraph_groups(inner):
+    """
+    Split a clean_tag_for_tg() output string into paragraph groups for the TG
+    generators. A single '\\n' (from one <br/>) is a soft return that must stay
+    within the same output paragraph/block. Two or more consecutive '\\n' mark a
+    real paragraph break that Google Docs collapsed into the same source <p> via
+    <br/><br/> instead of a separate empty <p> — those must become a NEW block so
+    downstream code inserts the normal inter-block spacer, rather than being
+    glued into the same paragraph with a single soft-return separator.
+
+    Returns a list of groups; each group is a list of balanced, non-empty line
+    strings (soft-return lines within one paragraph). Empty groups are dropped,
+    so the returned list may be empty if there was no visible content at all.
+    """
+    groups = []
+    for group_raw in re.split(r'\n{2,}', inner):
+        lines = [ln.strip() for ln in group_raw.split('\n') if ln.strip()]
+        # Skip lines that are only HTML tags with no visible text — artifact from
+        # <br/> inside bold/italic wrappers (e.g. <b> alone from <b><br/>text</b> split).
+        lines = [ln for ln in lines if re.sub(r'<[^>]+>', '', ln).strip()]
+        if not lines:
+            continue
+        balanced = []
+        for line in lines:
+            for t in ('i', 'b', 'u', 's'):
+                open_count = line.count(f'<{t}>')
+                close_count = line.count(f'</{t}>')
+                if open_count > close_count:
+                    line += f'</{t}>' * (open_count - close_count)
+                elif close_count > open_count:
+                    line = f'<{t}>' * (close_count - open_count) + line
+            balanced.append(line)
+        groups.append(balanced)
+    return groups
+
+
 def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
     """
     Generate <p><b>...</b></p> style HTML for GC mailings / Max.
@@ -3343,8 +3461,9 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
         # Remove empty formatting spans BEFORE splitting — Google Docs exports e.g.
         # <b>\n</b> (a bold span containing only a <br/>), which after split creates
         # a part starting with </b><b> (balanced 1:1, so the balance step ignores it)
-        # that ends up as <br></b><b> in the joined output.
-        inner = re.sub(r'<(b|i|u|s)>\s*</\1>', '', inner)
+        # that ends up as <br></b><b> in the joined output. Tags whose whitespace is
+        # 2+ newlines are left alone — see _strip_empty_format_tags.
+        inner = _strip_empty_format_tags(inner)
         # Also skip paragraphs that are HTML-only with no visible text (e.g. <b></b>, <b>&nbsp;</b>)
         inner_text = re.sub(r'<[^>]+>', '', inner).replace('&nbsp;', '').replace('\xa0', '').strip()
         if not inner_text:
@@ -3361,26 +3480,14 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
             inner
         )
 
-        # Split at soft returns (\n from <br> or Shift+Enter) and keep as ONE <p> with <br>
-        # separators — spacers must not appear between list items.
+        # Split into paragraph groups: a lone '\n' (soft return) stays within one <p>
+        # joined by <br>; 2+ consecutive '\n' (a blank line Google Docs collapsed into
+        # this same source <p>) becomes its own separate <p> — spacers between the
+        # resulting blocks are added by the uniform join below, same as any other
+        # pair of source paragraphs.
         if '\n' in inner:
-            sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
-            # Skip parts that are only HTML tags with no visible text — artifact from <br/>
-            # inside bold/italic wrappers (e.g. <b> alone from <b><br/>content</b> split).
-            sub_parts = [p for p in sub_parts if re.sub(r'<[^>]+>', '', p).strip()]
-            if not sub_parts:
-                continue
-            balanced = []
-            for part in sub_parts:
-                for t in ('i', 'b', 'u', 's'):
-                    open_count = part.count(f'<{t}>')
-                    close_count = part.count(f'</{t}>')
-                    if open_count > close_count:
-                        part += f'</{t}>' * (open_count - close_count)
-                    elif close_count > open_count:
-                        part = f'<{t}>' * (close_count - open_count) + part
-                balanced.append(part)
-            result_parts.append(f'<p>{"<br>".join(balanced)}</p>')
+            for balanced in _split_tg_paragraph_groups(inner):
+                result_parts.append(f'<p>{"<br>".join(balanced)}</p>')
         else:
             result_parts.append(f'<p>{inner}</p>')
 
@@ -3495,7 +3602,7 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
         if not inner:
             continue
         # Same empty-span cleanup as in generate_tg_html (see comment there)
-        inner = re.sub(r'<(b|i|u|s)>\s*</\1>', '', inner)
+        inner = _strip_empty_format_tags(inner)
         inner = re.sub(r'(?:<[^>]+>)*\s*ссылка:\s*(?:<\/[^>]+>)*\s*', '', inner, flags=re.IGNORECASE).strip()
         if not inner:
             continue
@@ -3508,26 +3615,13 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
             inner
         )
 
-        # Split soft-return (<br>) lines and keep as ONE entry joined with \n
-        # so list items stay compact (no blank line between them in the output).
+        # Split into paragraph groups: a lone '\n' (soft return) stays within one
+        # entry joined with '\n' (list items stay compact); 2+ consecutive '\n'
+        # (a blank line Google Docs collapsed into this same source <p>) becomes
+        # its own separate entry, which gets the normal '\n\n' block separator below.
         if '\n' in inner:
-            sub_parts = [p.strip() for p in inner.split('\n') if p.strip()]
-            # Skip parts that are only HTML tags with no visible text — artifact from <br/>
-            # inside bold/italic wrappers (e.g. <b> alone from <b><br/>content</b> split).
-            sub_parts = [p for p in sub_parts if re.sub(r'<[^>]+>', '', p).strip()]
-            if not sub_parts:
-                continue
-            balanced = []
-            for part in sub_parts:
-                for t in ('i', 'b', 'u', 's'):
-                    open_count = part.count(f'<{t}>')
-                    close_count = part.count(f'</{t}>')
-                    if open_count > close_count:
-                        part += f'</{t}>' * (open_count - close_count)
-                    elif close_count > open_count:
-                        part = f'<{t}>' * (close_count - open_count) + part
-                balanced.append(part)
-            result_parts.append('\n'.join(balanced))
+            for balanced in _split_tg_paragraph_groups(inner):
+                result_parts.append('\n'.join(balanced))
         else:
             result_parts.append(inner)
 
