@@ -2209,24 +2209,62 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                 btn_inner = m2.group(2).strip()
                 btn_label = f'{a_prefix} {btn_inner}'.strip() if a_prefix else btn_inner
                 # Also pick up any emoji-only text sibling that precedes the <a> in the tag
+                added_prefix = ''
                 if not a_prefix:
                     full_m = _BTN_BRACKET_RE.match(tag_text_clean)
                     if full_m and full_m.group(1).strip():
-                        btn_label = f'{full_m.group(1).strip()} {btn_label}'.strip()
+                        added_prefix = full_m.group(1).strip()
+                        btn_label = f'{added_prefix} {btn_label}'.strip()
                 btn_href = a.get('href', '#')
                 tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                pre_tag = post_tag = None
                 if tag_copy:
+                    # Locate the matching button anchor inside the copy and split its
+                    # siblings into "before" and "after" groups, so text that comes after
+                    # the button in the source (e.g. a line following the CTA link) stays
+                    # after the button instead of being glued to the text before it.
+                    btn_anchor_copy = None
                     for ba in tag_copy.find_all('a', href=True):
                         if _BTN_BRACKET_RE.match(_strip_trailing_footnotes(ba.get_text(strip=True))):
-                            ba.decompose()
-                    remaining = _strip_trailing_footnotes(tag_copy.get_text(strip=True))
-                    # Remove the emoji prefix that's now part of the button label
-                    if btn_label and remaining and remaining.startswith(m2.group(1).strip()):
-                        remaining = remaining[len(m2.group(1).strip()):].strip()
-                    if remaining:
-                        items.append({'kind': 'tag', 'tag': tag_copy})
+                            btn_anchor_copy = ba
+                            break
+                    pre_children, post_children = [], []
+                    if btn_anchor_copy is not None:
+                        bucket = pre_children
+                        for child in list(tag_copy.children):
+                            if child is btn_anchor_copy:
+                                bucket = post_children
+                                continue
+                            bucket.append(child)
+                    else:
+                        pre_children = list(tag_copy.children)
+
+                    # Drop a trailing emoji-only sibling from "pre" if it was folded into
+                    # btn_label above, so it isn't rendered twice.
+                    if added_prefix and pre_children:
+                        last = pre_children[-1]
+                        last_text = last.get_text(strip=True) if hasattr(last, 'get_text') else str(last).strip()
+                        if last_text == added_prefix:
+                            pre_children = pre_children[:-1]
+
+                    def _build_side_tag(children):
+                        if not children:
+                            return None
+                        side = BeautifulSoup(f'<{tag_copy.name}></{tag_copy.name}>', 'lxml').find(tag_copy.name)
+                        # Preserve the original tag's attributes (class/style — e.g. text-align)
+                        side.attrs = dict(tag_copy.attrs)
+                        for c in children:
+                            side.append(c.extract() if hasattr(c, 'extract') else c)
+                        return side if _strip_trailing_footnotes(side.get_text(strip=True)) else None
+
+                    pre_tag = _build_side_tag(pre_children)
+                    post_tag = _build_side_tag(post_children)
+                    if pre_tag is not None:
+                        items.append({'kind': 'tag', 'tag': pre_tag})
                 if not _btn_already_exists(btn_label):
                     items.append({'kind': 'btn', 'text': btn_label, 'url': btn_href})
+                if post_tag is not None:
+                    items.append({'kind': 'tag', 'tag': post_tag})
                 found_btn_anchor = True
                 break
         if not found_btn_anchor:
