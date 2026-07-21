@@ -820,9 +820,12 @@ def is_section_header(tag, ai_hints=None):
     # wrong section splits. All section detection is deterministic via keywords below.
 
     # Early check: merged paragraph where label is the very first word and content follows.
-    # Examples: "Телеграм🎉Ты уже в самой продвинутой тусовке...", "ТГ бот (ГК)Соберем..."
+    # Examples: "Телеграм🎉Ты уже в самой продвинутой тусовке...", "ТГ бот (ГК)Соберем...",
+    # "ТГ-БОТ..." (hyphenated label — split on the hyphen too, so "тг-бот" isn't read as
+    # one glued token "тгбот" that matches nothing).
     # Must run BEFORE the length guard, since merged paragraphs are long.
     _first_word_raw = text.split()[0] if text.split() else ''
+    _first_word_raw = re.split(r'[-–—]', _first_word_raw)[0]
     _first_word_alpha = ''.join(ch for ch in _first_word_raw if ch.isalpha())
     if _first_word_alpha in {'телеграм', 'telegram', 'тг', 'tg', 'бот', 'bot'} and text != _first_word_alpha:
         return 'tg_section'
@@ -897,6 +900,7 @@ def is_section_header(tag, ai_hints=None):
     # Google Docs sometimes puts the section label and first line in the same paragraph via <br> tags.
     # No length limit here — the merged paragraph can be arbitrarily long.
     first_word = text.split()[0] if text.split() else ''
+    first_word = re.split(r'[-–—]', first_word)[0]
     # Also handle label glued to emoji without space: "Телеграм🎉..."
     first_word_alpha = ''.join(ch for ch in first_word if ch.isalpha()).lower()
     if first_word_alpha in {'телеграм', 'telegram', 'бот', 'bot'}:
@@ -2286,14 +2290,27 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
         # Case 2: an <a> inside the tag wraps [BUTTON TEXT] (possibly with emoji before <a>)
         found_btn_anchor = False
         for a in tag.find_all('a', href=True):
-            m2 = _BTN_BRACKET_RE.match(_strip_trailing_footnotes(a.get_text(strip=True)))
-            if m2:
-                a_prefix = m2.group(1).strip()
-                btn_inner = m2.group(2).strip()
-                btn_label = f'{a_prefix} {btn_inner}'.strip() if a_prefix else btn_inner
+            a_text_clean = _strip_trailing_footnotes(a.get_text(strip=True))
+            m2 = _BTN_BRACKET_RE.match(a_text_clean)
+            # Case 2b: no brackets, but the link is the ENTIRE paragraph (common with
+            # Google Docs comment-resolved CTAs, e.g. "👉 ЗАБРОНИРОВАТЬ МЕСТО" with the
+            # URL attached via a doc comment instead of [bracket] text) — a paragraph
+            # that is nothing but one link is unambiguously a button, brackets or not.
+            is_whole_link_btn = (
+                not m2 and len(tag.find_all('a', href=True)) == 1
+                and a_text_clean and _btn_norm(a_text_clean) == _btn_norm(tag_text_clean)
+            )
+            if m2 or is_whole_link_btn:
+                if m2:
+                    a_prefix = m2.group(1).strip()
+                    btn_inner = m2.group(2).strip()
+                    btn_label = f'{a_prefix} {btn_inner}'.strip() if a_prefix else btn_inner
+                else:
+                    a_prefix = ''
+                    btn_label = a_text_clean
                 # Also pick up any emoji-only text sibling that precedes the <a> in the tag
                 added_prefix = ''
-                if not a_prefix:
+                if not a_prefix and m2:
                     full_m = _BTN_BRACKET_RE.match(tag_text_clean)
                     if full_m and full_m.group(1).strip():
                         added_prefix = full_m.group(1).strip()
@@ -2307,8 +2324,14 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                     # the button in the source (e.g. a line following the CTA link) stays
                     # after the button instead of being glued to the text before it.
                     btn_anchor_copy = None
-                    for ba in tag_copy.find_all('a', href=True):
-                        if _BTN_BRACKET_RE.match(_strip_trailing_footnotes(ba.get_text(strip=True))):
+                    copy_links = tag_copy.find_all('a', href=True)
+                    for ba in copy_links:
+                        ba_text_clean = _strip_trailing_footnotes(ba.get_text(strip=True))
+                        if _BTN_BRACKET_RE.match(ba_text_clean):
+                            btn_anchor_copy = ba
+                            break
+                        if (is_whole_link_btn and len(copy_links) == 1 and ba_text_clean
+                                and _btn_norm(ba_text_clean) == _btn_norm(tag_text_clean)):
                             btn_anchor_copy = ba
                             break
                     pre_children, post_children = [], []
