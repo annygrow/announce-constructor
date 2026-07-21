@@ -81,6 +81,29 @@ def _upload_image_to_yc(data_uri: str):
         logging.warning(f'[YC Upload] Error: {e}')
         return None
 
+
+def _replace_base64_images_with_yc_urls(html):
+    """Replace <img src="data:image/...;base64,..."> with an uploaded YC URL.
+    Runs at parse time so the huge base64 payload never has to round-trip
+    through the browser (parse response → generate request) — Google Docs
+    export embeds pasted screenshots as base64, which can bloat a doc to
+    10+ MB and get rejected by the proxy's request body size limit.
+    Falls back to leaving the data URI untouched if upload fails (e.g. no
+    YC credentials) — the existing generate-time upload/fallback logic
+    still handles that case."""
+    if not html or 'data:image' not in html:
+        return html
+    soup = BeautifulSoup(html, 'html.parser')
+    changed = False
+    for img in soup.find_all('img'):
+        src = img.get('src', '')
+        if src.startswith('data:image'):
+            yc_url = _upload_image_to_yc(src)
+            if yc_url:
+                img['src'] = yc_url
+                changed = True
+    return str(soup) if changed else html
+
 logging.basicConfig(
     filename='debug.log',
     level=logging.DEBUG,
@@ -3856,6 +3879,17 @@ def api_parse():
                     {'name': 'ТГ (основной)', 'html': main_tg},
                     {'name': 'ТГ (Воронки)', 'html': tg_voronki_ai},
                 ]
+
+    # Upload any base64 screenshots to YC now, before the payload goes back
+    # to the browser — avoids re-sending megabytes of base64 on generate.
+    parsed['email_html'] = _replace_base64_images_with_yc_urls(parsed['email_html'])
+    parsed['tg_html'] = _replace_base64_images_with_yc_urls(parsed['tg_html'])
+    if parsed.get('email_variants'):
+        for v in parsed['email_variants']:
+            v['html'] = _replace_base64_images_with_yc_urls(v['html'])
+    if parsed.get('tg_variants'):
+        for v in parsed['tg_variants']:
+            v['html'] = _replace_base64_images_with_yc_urls(v['html'])
 
     log_msg = (
         f"parse: email_html={bool(parsed['email_html'])} "
