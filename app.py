@@ -2222,8 +2222,10 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
         # where [b] is an inline <sup> footnote ref placed between the button and body text.
         tag_text_clean = _strip_button_footnotes(tag_text)
 
-        # Case -1: paragraph containing only an image (no text)
-        if not tag_text_clean and tag.name == 'p':
+        # Case -1: paragraph/heading containing only an image (no text). Headings are
+        # included because Google Docs sometimes wraps a pasted screenshot in <h1-4>
+        # (via a sizing <span>) instead of <p>.
+        if not tag_text_clean and tag.name in ('p', 'h1', 'h2', 'h3', 'h4'):
             img_tag = tag.find('img')
             # Accept both http URLs and base64-encoded images from Google Docs
             img_src = img_tag.get('src', '') if img_tag else ''
@@ -2912,8 +2914,19 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 if row:
                     raw_blocks.append((row, meta))
         elif el.name in ('h1', 'h2', 'h3', 'h4', 'ul', 'ol'):
-            if el.get_text(strip=True) and not _is_reklama(el):
+            if _is_reklama(el):
+                pass
+            elif el.get_text(strip=True):
                 pending_tags.append(el)
+            elif el.name in ('h1', 'h2', 'h3', 'h4'):
+                # Empty-text heading wrapping only an image — Google Docs sometimes puts
+                # a pasted screenshot inside <h1-4> (e.g. wrapped in a sizing <span>)
+                # instead of <p>. Same handling as the empty-<p>-with-image case below.
+                img_tag = el.find('img')
+                img_src = img_tag.get('src', '') if img_tag else ''
+                if img_src and (img_src.startswith('http') or img_src.startswith('data:image')):
+                    flush_pending()
+                    pending_tags.append(el)
         elif el.name == 'p':
             # Normalize non-breaking spaces — Google Docs empty paragraphs often
             # contain only &nbsp; which get_text sees as non-empty text.
