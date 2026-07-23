@@ -1221,6 +1221,33 @@ def resolve_comment_refs(html_str, cmnt_url_map):
                 sup.decompose()
                 continue
 
+        # If prev is just a lone "]" (Google Docs split the button's closing bracket
+        # into its own span), the actual button text lives in earlier sibling(s) that
+        # contain the matching "[". Walk back and wrap the whole [.."] run in one <a>,
+        # instead of wrapping only the "]" span (which breaks button-bracket detection).
+        if prev_text == ']':
+            run = [prev]
+            cursor = prev.previous_sibling
+            found_open = False
+            steps = 0
+            while cursor is not None and steps < 8:
+                if hasattr(cursor, 'name') and cursor.name == 'br':
+                    break
+                run.insert(0, cursor)
+                cursor_text = cursor.get_text() if hasattr(cursor, 'get_text') else str(cursor)
+                if '[' in cursor_text:
+                    found_open = True
+                    break
+                cursor = cursor.previous_sibling
+                steps += 1
+            if found_open:
+                new_a = soup.new_tag('a', href=url)
+                run[0].insert_before(new_a)
+                for node in run:
+                    new_a.append(node.extract())
+                sup.decompose()
+                continue
+
         if isinstance(prev, NavigableString):
             # Wrap the text node in <a>
             new_a = soup.new_tag('a', href=url)
@@ -3426,6 +3453,12 @@ def _strip_empty_format_tags(inner):
         whitespace = m.group(2)
         if whitespace.count('\n') >= 2:
             return m.group(0)
+        if '\n' in whitespace:
+            # A single soft-return (Shift+Enter) landed alone in its own formatting
+            # span (e.g. producer changed style right at the line break) — the tag
+            # is pointless but the line break itself is real. Unwrap the tag, keep
+            # the newline so downstream split-on-'\n' still sees the line boundary.
+            return whitespace
         return ''
     return re.sub(r'<(b|i|u|s)>(\s*)</\1>', _repl, inner)
 
