@@ -802,11 +802,15 @@ def is_section_header(tag, ai_hints=None):
     if tag.find_parent('table'):
         return None
 
-    text = get_text_content(tag).lower().strip()
-    # Normalize soft-return line breaks so "Сообщение\nдля бота ТГ" matches keywords.
-    text = text.replace('\n', ' ')
-    # Normalize "тема :" → "тема:" — Google Docs splits label and colon into separate
-    # spans; get_text_content() inserts a space between them, breaking startswith checks.
+    # Use a tight (no-separator) join, not get_text_content()'s space-separated one:
+    # Google Docs sometimes splits a single label word across two adjacent spans with
+    # no actual space character between them (e.g. spellcheck/autoformat splitting
+    # "Тема" into "Тем"+"а") — space-joining would turn that into "тем а", which no
+    # longer starts with the "тема:" keyword below. Real inter-word spaces survive
+    # this join fine since they're literal space characters inside the text nodes.
+    text = ' '.join(tag.get_text('').replace('\xa0', ' ').split()).lower()
+    # Normalize "тема :" → "тема:" for the (rarer) case of a genuine space typed
+    # before the colon in the source.
     text = re.sub(r'\s+:', ':', text)
     if not text:
         return None
