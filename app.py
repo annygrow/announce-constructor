@@ -787,6 +787,21 @@ def get_text_content(tag):
     """Get plain text from a BS4 tag, collapsing whitespace."""
     return ' '.join(tag.get_text(' ', strip=True).replace('\xa0', ' ').split())
 
+def _tight_text_with_br_boundary(tag):
+    """Like tag.get_text('') — glues adjacent spans with no separator, so a word
+    split across spans without a real space (e.g. spellcheck 'Тем'+'а') still reads
+    as one word — but treats <br> as an actual boundary (space) instead of letting
+    it vanish. Without this, a Google Docs shape like '<span>БОТ<br/><br/></span>
+    <span>Тест-драйв...</span>' collapses into an unmatchable glued token
+    'боттест-драйв' instead of 'бот тест-драйв...'."""
+    parts = []
+    for node in tag.descendants:
+        if isinstance(node, NavigableString):
+            parts.append(str(node))
+        elif getattr(node, 'name', None) == 'br':
+            parts.append(' ')
+    return ''.join(parts)
+
 def is_section_header(tag, ai_hints=None):
     """
     Returns the section key if this tag is a section divider, else None.
@@ -808,7 +823,7 @@ def is_section_header(tag, ai_hints=None):
     # "Тема" into "Тем"+"а") — space-joining would turn that into "тем а", which no
     # longer starts with the "тема:" keyword below. Real inter-word spaces survive
     # this join fine since they're literal space characters inside the text nodes.
-    text = ' '.join(tag.get_text('').replace('\xa0', ' ').split()).lower()
+    text = ' '.join(_tight_text_with_br_boundary(tag).replace('\xa0', ' ').split()).lower()
     # Normalize "тема :" → "тема:" for the (rarer) case of a genuine space typed
     # before the colon in the source.
     text = re.sub(r'\s+:', ':', text)
