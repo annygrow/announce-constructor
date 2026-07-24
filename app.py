@@ -1400,7 +1400,17 @@ def detect_segment_from_doc(other_tags, highlight_classes):
     scan_start = 0
     for i, tag in enumerate(other_tags):
         text = get_text_content(tag).lower()
-        if 'сегмент' in text and ('отправ' in text or '(' in text):
+        # Require "отправ" specifically (not a bare "(" fallback) — the header this
+        # is meant to find ("Сегмент отправки (...)") is currently unreachable here
+        # in the first place (is_section_header's meta_kw classifies it as 'skip'
+        # before it ever reaches other_tags, so this loop realistically never finds
+        # its real target). A loose "'(' in text" match risks latching onto an
+        # unrelated later tag that merely contains "сегмент" and some parentheses —
+        # e.g. a flattened exclusions <table> listing "Сегмент технарей" among
+        # generic boilerplate rows with their own unrelated "(...)" asides — which
+        # hijacks scan_start past the real audience marker. Confirmed as the cause
+        # of a real "Нейро segment not detected" report (2026-07-24).
+        if 'сегмент' in text and 'отправ' in text:
             for paren in re.findall(r'\(([^)]*)\)', text):
                 if 'бел' in paren:
                     mode = 'include'
@@ -1411,9 +1421,19 @@ def detect_segment_from_doc(other_tags, highlight_classes):
 
     presence_ai = presence_dev = False
     highlighted_ai = highlighted_dev = False
+    tables_seen = 0
     for tag in other_tags[scan_start:scan_start + 12]:
         if tag.name == 'table':
-            break
+            # The very first table hit is normally the "Канал/Бот-почта/Место
+            # отправки" channel config table, which always precedes the audience
+            # segment area in the standard doc template — skip past it rather than
+            # stopping the scan there. A second table is more likely the exclusions
+            # boilerplate (or real content) that follows the segment area, so stop
+            # there as before.
+            tables_seen += 1
+            if tables_seen > 1:
+                break
+            continue
         text = get_text_content(tag).lower()
         if _SEG_AI_RE.search(text):
             presence_ai = True
