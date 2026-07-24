@@ -462,6 +462,7 @@ html, body {
   flex-direction: column;
   gap: 10px;
   flex: 1;
+  min-height: 0;
 }
 
 .tab-content.active { display: flex; }
@@ -995,6 +996,22 @@ html, body {
 .block-edit-actions {
   display: flex;
   gap: 6px;
+}
+
+/* Pinned to the bottom of .email-right-col's own scroll area so "+ Добавить блок"
+   is always reachable without also needing to scroll the outer .output-panel —
+   the two nested scrollbars made the button undiscoverable otherwise. */
+.block-add-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  background: var(--bg);
+  margin-top: -8px;
+  padding-top: 8px;
 }
 
 .add-block-btn {

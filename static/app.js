@@ -295,26 +295,28 @@ function createEmailPanelEl(key, html, blocks) {
       <div class="email-right-col">
         <div class="block-editor-title">Блоки письма</div>
         <div class="block-list" id="blocklist-${key}"></div>
-        <button class="add-block-btn" onclick="showAddBlockForm('${key}')">+ Добавить блок</button>
-        <div id="addform-${key}" class="add-block-form" style="display:none">
-          <select id="newtype-${key}" onchange="toggleNewBlockFields('${key}')">
-            ${Object.entries(BLOCK_LABELS).map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
-          </select>
-          <textarea id="newtext-${key}" placeholder="Текст (каждый абзац — отдельная строка)..."></textarea>
-          <div id="newcols-${key}" style="display:none;flex-direction:column;gap:6px">
-            <textarea id="newcol2-${key}" placeholder="Текст второй колонки..."></textarea>
-            <textarea id="newcol3-${key}" style="display:none" placeholder="Текст третьей колонки..."></textarea>
-          </div>
-          <div id="newbtn-${key}" style="display:none;flex-direction:column;gap:6px">
-            <input type="text" id="newbtntext-${key}" placeholder="Текст кнопки">
-            <input type="url"  id="newbtnurl-${key}"  placeholder="URL кнопки (https://...)">
-          </div>
-          <div id="newimg-${key}" style="display:none">
-            <input type="url" id="newimgurl-${key}" placeholder="URL картинки">
-          </div>
-          <div class="add-block-actions">
-            <button class="toolbar-btn primary-btn" onclick="addBlock('${key}')">Добавить</button>
-            <button class="toolbar-btn" onclick="hideAddBlockForm('${key}')">Отмена</button>
+        <div class="block-add-footer">
+          <button class="add-block-btn" onclick="showAddBlockForm('${key}')">+ Добавить блок</button>
+          <div id="addform-${key}" class="add-block-form" style="display:none">
+            <select id="newtype-${key}" onchange="toggleNewBlockFields('${key}')">
+              ${Object.entries(BLOCK_LABELS).map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+            </select>
+            <textarea id="newtext-${key}" placeholder="Текст (каждый абзац — отдельная строка)..."></textarea>
+            <div id="newcols-${key}" style="display:none;flex-direction:column;gap:6px">
+              <textarea id="newcol2-${key}" placeholder="Текст второй колонки..."></textarea>
+              <textarea id="newcol3-${key}" style="display:none" placeholder="Текст третьей колонки..."></textarea>
+            </div>
+            <div id="newbtn-${key}" style="display:none;flex-direction:column;gap:6px">
+              <input type="text" id="newbtntext-${key}" placeholder="Текст кнопки">
+              <input type="url"  id="newbtnurl-${key}"  placeholder="URL кнопки (https://...)">
+            </div>
+            <div id="newimg-${key}" style="display:none">
+              <input type="url" id="newimgurl-${key}" placeholder="URL картинки">
+            </div>
+            <div class="add-block-actions">
+              <button class="toolbar-btn primary-btn" onclick="addBlock('${key}')">Добавить</button>
+              <button class="toolbar-btn" onclick="hideAddBlockForm('${key}')">Отмена</button>
+            </div>
           </div>
         </div>
       </div>
