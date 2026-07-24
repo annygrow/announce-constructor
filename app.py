@@ -869,14 +869,28 @@ def is_section_header(tag, ai_hints=None):
     if any(text.startswith(kw) or text == kw.rstrip(':') for kw in meta_kw):
         return 'skip'
 
+    # Merged email header: "ПОЧТА От кого: ...", "Почта ГК", "Почта (обычная)" etc.
+    # First word is a recognized email label followed by extra descriptor text.
+    # Must run BEFORE the length guard below, since merged paragraphs are long
+    # (mirrors the TG version above — this used to run after the guard and never
+    # matched when Google Docs glued a Тема:/preview line onto the same paragraph).
+    if _first_word_alpha in {'почта', 'письмо'} and text != _first_word_alpha:
+        return 'email_section'
+
+    # Merged "Другие источники: ..." header — phrase-based label (multi-word, so it
+    # can't reuse the single first-word check above) immediately followed by more
+    # content in the same paragraph, e.g. "Другие источники: Тема: ...<br><br>Разберем
+    # по шагам...". Must also run before the length guard for the same reason.
+    other_src_label_kw = ['другие источники', 'другие каналы', 'другой источник', 'другие боты',
+                           'другой текст', 'для др источников', 'для других источников',
+                           'др источники', 'для др. источников', 'другой ист', 'другие ист',
+                           'письмо в юнисендер', 'письмо для юнисендера', 'письмо юнисендер']
+    if any(text.startswith(kw) for kw in other_src_label_kw):
+        return 'email_section'
+
     # Section headers are short labels, not body sentences
     if len(text) > 120:
         return None
-
-    # Merged email header: "ПОЧТА От кого: ...", "Почта ГК", "Почта (обычная)" etc.
-    # First word is a recognized email label followed by extra descriptor text.
-    if _first_word_alpha in {'почта', 'письмо'} and text != _first_word_alpha:
-        return 'email_section'
 
     # Skip rows that are clearly channel entries or service addresses
     skip_kw = ['care@', '@zerocoder', 'getcourse', 'unisender', 'bot (',
