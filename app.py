@@ -802,6 +802,14 @@ def _tight_text_with_br_boundary(tag):
             parts.append(' ')
     return ''.join(parts)
 
+# Aliases for the "Другие источники" email section label. Module-level (not local to
+# is_section_header) because process_block()'s merged-header content-preservation logic
+# needs the same list to recognize the label as discardable, not real content.
+OTHER_SRC_LABEL_KW = ['другие источники', 'другие каналы', 'другой источник', 'другие боты',
+                      'другой текст', 'для др источников', 'для других источников',
+                      'др источники', 'для др. источников', 'другой ист', 'другие ист',
+                      'письмо в юнисендер', 'письмо для юнисендера', 'письмо юнисендер']
+
 def is_section_header(tag, ai_hints=None):
     """
     Returns the section key if this tag is a section divider, else None.
@@ -843,10 +851,17 @@ def is_section_header(tag, ai_hints=None):
     # "ТГ-БОТ..." (hyphenated label — split on the hyphen too, so "тг-бот" isn't read as
     # one glued token "тгбот" that matches nothing).
     # Must run BEFORE the length guard, since merged paragraphs are long.
+    # Set matches tg_label_words below (the content-preservation logic for merged TG
+    # headers) — that code already expected 'max' to be a possible merged label, but this
+    # classification check didn't recognize it as one, so a merged "MAX<br><br>..." header
+    # would never have reached the preservation code in the first place. Added
+    # 'нейрокот'/'помощник' too since they're valid standalone TG labels (tg_exact below)
+    # that could plausibly get glued the same way, even without a confirmed case yet.
     _first_word_raw = text.split()[0] if text.split() else ''
     _first_word_raw = re.split(r'[-–—]', _first_word_raw)[0]
     _first_word_alpha = ''.join(ch for ch in _first_word_raw if ch.isalpha())
-    if _first_word_alpha in {'телеграм', 'telegram', 'тг', 'tg', 'бот', 'bot'} and text != _first_word_alpha:
+    if (_first_word_alpha in {'телеграм', 'telegram', 'тг', 'tg', 'бот', 'bot', 'max', 'нейрокот', 'помощник'}
+            and text != _first_word_alpha):
         return 'tg_section'
 
     # Meta-content labels: skip entirely (neither section header nor content).
@@ -881,12 +896,23 @@ def is_section_header(tag, ai_hints=None):
     # can't reuse the single first-word check above) immediately followed by more
     # content in the same paragraph, e.g. "Другие источники: Тема: ...<br><br>Разберем
     # по шагам...". Must also run before the length guard for the same reason.
-    other_src_label_kw = ['другие источники', 'другие каналы', 'другой источник', 'другие боты',
-                           'другой текст', 'для др источников', 'для других источников',
-                           'др источники', 'для др. источников', 'другой ист', 'другие ист',
-                           'письмо в юнисендер', 'письмо для юнисендера', 'письмо юнисендер']
-    if any(text.startswith(kw) for kw in other_src_label_kw):
+    if any(text.startswith(kw) for kw in OTHER_SRC_LABEL_KW):
         return 'email_section'
+
+    # Merged "Тема:"/"Прехедер:" header immediately followed by more real content in the
+    # same paragraph, e.g. "Тема: X!<br><br>Разберем по шагам..." — same class of bug as
+    # the checks above, found the same day: this used to sit only in the post-guard block
+    # below and silently swallowed (or discarded) the real sentence that follows once the
+    # merged paragraph grew past 120 chars. Startswith-anchored only here (not "kw in text")
+    # to avoid false-positives from body sentences that merely mention these words
+    # mid-paragraph — that broader substring match is kept in the post-guard fallback below,
+    # bounded to short (<=120 char) text where it's safe.
+    subject_kw = ['тема письма', 'тема:', 'темы:', 'subject:']
+    preview_kw = ['превью:', 'прехедер:', 'прехендер:', 'preview:', 'preheader:', 'preheader :', 'прехэдер:']
+    if any(text.startswith(kw) for kw in subject_kw):
+        return 'subject'
+    if any(text.startswith(kw) for kw in preview_kw):
+        return 'preview'
 
     # Section headers are short labels, not body sentences
     if len(text) > 120:
@@ -915,8 +941,6 @@ def is_section_header(tag, ai_hints=None):
              'бота тг', 'бота telegram', 'сообщение для тг', 'сообщение для бота',
              'ботов тг', 'ботов telegram', 'сообщение для ботов']
     tg_only_kw = ['телеграм:', 'telegram:']
-    subject_kw = ['тема письма', 'тема:', 'темы:', 'subject:']
-    preview_kw = ['превью:', 'прехедер:', 'прехендер:', 'preview:', 'preheader:', 'preheader :', 'прехэдер:']
 
     # Standalone email section headers — exact match
     email_exact = {'почта', 'письмо', 'e-mail', 'email', 'почта гк', 'email гк', 'почта (гк)', 'mail'}
@@ -929,25 +953,16 @@ def is_section_header(tag, ai_hints=None):
     if text in tg_exact:
         return 'tg_section'
 
-    # Handle merged paragraph: label + first content line in one <p> (e.g. "Телеграм\n🎉Ты уже...")
-    # Google Docs sometimes puts the section label and first line in the same paragraph via <br> tags.
-    # No length limit here — the merged paragraph can be arbitrarily long.
-    first_word = text.split()[0] if text.split() else ''
-    first_word = re.split(r'[-–—]', first_word)[0]
-    # Also handle label glued to emoji without space: "Телеграм🎉..."
-    first_word_alpha = ''.join(ch for ch in first_word if ch.isalpha()).lower()
-    if first_word_alpha in {'телеграм', 'telegram', 'бот', 'bot'}:
-        return 'tg_section'
-
     # Skip standalone single-word channel-type labels that appear in config tables
     if text in ('telegram/max', 'приложение'):
         return None
 
-    for kw in subject_kw:
-        if text.startswith(kw):
-            return 'subject'
+    # Broader substring fallback for preview_kw (unlike subject_kw's plain startswith
+    # above, this also matches mid-paragraph occurrences) — deliberately left bounded
+    # to text that already passed the <=120-char guard, to avoid false-positives from
+    # long body sentences that merely mention "прехедер:"/"preview:" somewhere inside.
     for kw in preview_kw:
-        if text.startswith(kw) or kw in text:
+        if kw in text:
             return 'preview'
     for kw in email_kw:
         if kw in text:
@@ -1586,6 +1601,68 @@ def parse_doc_html(html_content, ai_hints=None):
             else:
                 sections['other'].append(t)
 
+        def _consume_leading_meta(tag_copy):
+            """Mutates tag_copy in place: strips leading Тема:/Прехедер: meta-line
+            children (extracting their values into subject/preview, only if not
+            already set) plus any purely-empty spacer children (bare <br> artifacts).
+            Stops at the first real content, keeping it and everything after it.
+            Returns True if real content remains in tag_copy afterwards.
+
+            Children are grouped by <br> boundaries before matching — not matched
+            span-by-span in isolation — because Google Docs sometimes splits a label
+            word across two adjacent spans with no <br> between them (e.g. spellcheck
+            splitting "Тема" into "Тем"+"а"); matching each span alone would miss that
+            and treat the trailing fragment as if real content had already started.
+            An <img> found while still consuming stops the scan too (Google Docs
+            sometimes glues a picture directly onto a meta line with no blank
+            paragraph between them — must not be discarded).
+
+            Shared by the 'subject'/'preview' meta-line handlers and the merged
+            "Label: Тема: ...<br><br>content" email-header case, so a paragraph like
+            "Другие источники: " + "Тема: X" + "the real first sentence" — all glued
+            via <br><br> into one <p> by Google Docs — loses only the label/meta
+            lines and keeps the real sentence instead of discarding the whole tag.
+            """
+            nonlocal subject, preview
+            children = list(tag_copy.children)
+            groups = []  # list of (children_in_group, joined_raw_text)
+            group_children, group_text_parts = [], []
+            for child in children:
+                group_children.append(child)
+                group_text_parts.append(child.get_text('', strip=False) if hasattr(child, 'get_text') else str(child))
+                if hasattr(child, 'find') and child.find('br') is not None:
+                    groups.append((group_children, ''.join(group_text_parts)))
+                    group_children, group_text_parts = [], []
+            if group_children:
+                groups.append((group_children, ''.join(group_text_parts)))
+
+            to_remove = []
+            for grp_children, grp_raw in groups:
+                text = ' '.join(grp_raw.replace('\xa0', ' ').split()).strip()
+                if not text:
+                    if any(hasattr(c, 'find') and c.find('img') for c in grp_children):
+                        break
+                    to_remove.extend(grp_children)
+                    continue
+                m_subj = re.match(r'^тема(?:\s+письма)?\s*:\s*(.+)', text, re.IGNORECASE)
+                if m_subj:
+                    if not subject:
+                        subject = m_subj.group(1).strip()
+                    to_remove.extend(grp_children)
+                    continue
+                m_prev = re.match(
+                    r'^(?:прехедер|прехендер|прехэдер|превью|preview|preheader)\s*:\s*(.+)',
+                    text, re.IGNORECASE)
+                if m_prev:
+                    if not preview:
+                        preview = m_prev.group(1).strip()
+                    to_remove.extend(grp_children)
+                    continue
+                break  # first real content group — stop consuming, keep it and the rest
+            for child in to_remove:
+                child.extract()
+            return bool(get_text_content(tag_copy).strip())
+
         # Handle merged paragraph: body content + section label (e.g. "Другие источники")
         # in the same <p>, separated by <br/> tags.  Split them before any other detection
         # so that the CTA button stays in the current email section and the label correctly
@@ -1670,6 +1747,53 @@ def parse_doc_html(html_content, ai_hints=None):
             name = re.sub(r'\s+от кого.*', '', name, flags=re.IGNORECASE).strip()
             email_subsections.append({'name': name[:50], 'blocks': []})
             current_section = 'email_section'
+
+            # If this header is "merged" (label glued via <br><br> to more content in the
+            # same <p> — e.g. "Другие источники: " + "Тема: ..." + the real first sentence,
+            # all as separate sibling spans), don't discard the whole tag: drop only the
+            # leading children that are THEMSELVES recognized labels/numbered structural
+            # headings, then hand off to _consume_leading_meta() for any glued Тема:/
+            # Прехедер: lines, keeping whatever real content remains as the section's first
+            # block.
+            #
+            # Must recognize the label rather than blindly taking "the first non-empty
+            # child" — some documents glue the numbered structural heading ("4. Контент
+            # письма", metadata, not a channel label) in front of the REAL label
+            # ("ПОЧТА (1 клик)") as a separate preceding child, e.g. "<span>4. Контент
+            # письма<br><br></span><span>ПОЧТА (1 клик)</span>". Taking the first child
+            # unconditionally would strip only "4. Контент письма" and then treat
+            # "ПОЧТА (1 клик)" itself as real content, leaking the label into the email
+            # body — confirmed as a regression while testing this fix (2026-07-24) on
+            # an existing document unrelated to the case this was written for.
+            #
+            # If nothing at the front matches a recognized pattern, stay conservative and
+            # don't touch the tag at all — better to keep the pre-existing "discard the
+            # whole merged header" behavior than risk keeping something we can't identify.
+            if tag.find('br'):
+                tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                if tag_copy:
+                    to_remove = []
+                    for child in list(tag_copy.children):
+                        child_text = (child.get_text(' ', strip=True) if hasattr(child, 'get_text')
+                                      else str(child)).replace('\xa0', ' ').strip()
+                        if not child_text:
+                            to_remove.append(child)
+                            continue
+                        child_lower = child_text.lower()
+                        is_numbered_heading = bool(re.match(r'^\d+[.)]\s', child_lower))
+                        is_known_label = (
+                            child_lower in ('почта', 'письмо')
+                            or child_lower.startswith(('почта ', 'почта(', 'письмо ', 'письмо('))
+                            or any(child_lower.startswith(kw) for kw in OTHER_SRC_LABEL_KW)
+                        )
+                        if is_numbered_heading or is_known_label:
+                            to_remove.append(child)
+                            continue
+                        break  # first child that isn't a recognized label/heading — stop
+                    for child in to_remove:
+                        child.extract()
+                    if to_remove and _consume_leading_meta(tag_copy):
+                        email_subsections[-1]['blocks'].append(tag_copy)
             return
         if section_type == 'tg_section' and tag.name == 'li':
             # Suppress premature TG detection from document outline/config lists.
@@ -1685,7 +1809,7 @@ def parse_doc_html(html_content, ai_hints=None):
             # "Merged" means the paragraph has more than just the section-label word.
             # We detect this by checking that the tag contains at least two distinct spans
             # (the label span and the content span), or the text is longer than the label alone.
-            tg_label_words = {'телеграм', 'telegram', 'тг', 'tg', 'max', 'бот', 'bot'}
+            tg_label_words = {'телеграм', 'telegram', 'тг', 'tg', 'max', 'бот', 'bot', 'нейрокот', 'помощник'}
             full_lower = full_text.lower()
             # Strip leading alpha chars to get the label (handles "Телеграм🎉..." glued together)
             first_word_raw = full_text.split()[0] if full_text.split() else ''
@@ -1715,28 +1839,21 @@ def parse_doc_html(html_content, ai_hints=None):
                     if get_text_content(tag_copy).strip():
                         tg_subsections[-1]['blocks'].append(tag_copy)
             return
-        if section_type == 'subject':
-            # Use empty separator so adjacent spans within one word don't get a
-            # spurious space (e.g. "п" + "оследний" → "последний", not "п оследний").
-            raw = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
-            extracted = re.sub(r'^[^:]+\s*:\s*', '', raw, count=1).strip()
-            if extracted and not subject:
-                subject = extracted
-            # The label text is consumed, but if an image is glued to the same
-            # paragraph (no blank line between "Тема: ..." and the picture),
-            # don't throw it away with the rest of the meta line.
-            residual = _extract_residual_media(tag)
-            if residual is not None:
-                _route(residual)
-            return
-        if section_type == 'preview':
-            raw = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
-            extracted = re.sub(r'^[^:]+\s*:\s*', '', raw, count=1).strip()
-            if extracted and not preview:
-                preview = extracted
-            residual = _extract_residual_media(tag)
-            if residual is not None:
-                _route(residual)
+        if section_type in ('subject', 'preview'):
+            # _consume_leading_meta() extracts subject/preview itself from whichever
+            # leading groups match Тема:/Прехедер: — handles both the plain single-line
+            # case and Google Docs gluing extra real content onto the same paragraph via
+            # <br><br> (e.g. "Тема: X!<br><br>Разберем по шагам..." — that trailing
+            # sentence used to be silently swallowed into the subject/discarded outright).
+            tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+            if tag_copy and _consume_leading_meta(tag_copy):
+                _route(tag_copy)
+            else:
+                # Fallback: an image glued to the meta line with no <br> group
+                # boundary my new scan would recognize — same safety net as before.
+                residual = _extract_residual_media(tag)
+                if residual is not None:
+                    _route(residual)
             return
 
         # Also detect inline subject/preview in the 'other' or 'email_section' when
