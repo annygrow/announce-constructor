@@ -828,17 +828,17 @@ function saveBlockEdit(channelKey, idx) {
     const ta = area.querySelector('.block-edit-textarea');
     const text = ta ? ta.value : '';
     const isBlue = ['block_blue_cta', 'block_blue_text'].includes(block.type);
-    block.paragraphs_html = makeParaHtml(text, isBlue ? '#ffffff' : '#333333');
+    block.paragraphs_html = makeParaHtml(text, isBlue ? '#ffffff' : '#333333', _fontSizeForBlockType(block.type));
     block.preview_text = text.replace(/<[^>]+>/g, '').trim().substring(0, 80);
   }
 
   if (['block_2col_text_text', 'block_3col_text'].includes(block.type)) {
     const ta2 = area.querySelector('.block-edit-col2');
-    if (ta2) block.col2_html = makeParaHtml(ta2.value, '#333333');
+    if (ta2) block.col2_html = makeParaHtml(ta2.value, '#333333', _fontSizeForBlockType(block.type));
   }
   if (block.type === 'block_3col_text') {
     const ta3 = area.querySelector('.block-edit-col3');
-    if (ta3) block.col3_html = makeParaHtml(ta3.value, '#333333');
+    if (ta3) block.col3_html = makeParaHtml(ta3.value, '#333333', _fontSizeForBlockType(block.type));
   }
 
   if (['block_blue_cta', 'block_button'].includes(block.type)) {
@@ -1043,9 +1043,18 @@ function toggleNewBlockFields(channelKey) {
                                 'Текст (каждый абзац — отдельная строка)...';
 }
 
-function makeParaHtml(text, color) {
+// Two/three-column blocks render narrower text at a smaller size than full-width
+// blocks — must match the font-size the server uses when first generating these
+// blocks (_cell_para_html / block_2col_*), or editing+saving silently upsizes them.
+function _fontSizeForBlockType(type) {
+  if (type === 'block_3col_text') return 14;
+  if (['block_2col_img_text', 'block_2col_text_img', 'block_2col_text_text'].includes(type)) return 16;
+  return 18;
+}
+
+function makeParaHtml(text, color, fontSize = 18) {
   const linkColor = color === '#ffffff' ? '#e1fb52' : '#1445ea';
-  const pBase = `margin:0 0 10px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:27px;color:${color};font-size:18px`;
+  const pBase = `margin:0 0 10px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:27px;color:${color};font-size:${fontSize}px`;
   const spacer = `<p style="margin:0;font-size:8px;line-height:16px">&nbsp;</p>`;
   return text.split('\n')
     .map(l => {
@@ -1079,12 +1088,13 @@ function addBlock(channelKey) {
 
   const isBlue = ['block_blue_cta', 'block_blue_text'].includes(type);
   const color  = isBlue ? '#ffffff' : '#333333';
+  const fontSize = _fontSizeForBlockType(type);
 
   const newBlock = {
     type,
-    paragraphs_html: makeParaHtml(rawText, color),
-    col2_html:  rawCol2 ? makeParaHtml(rawCol2, '#333333') : '',
-    col3_html:  rawCol3 ? makeParaHtml(rawCol3, '#333333') : '',
+    paragraphs_html: makeParaHtml(rawText, color, fontSize),
+    col2_html:  rawCol2 ? makeParaHtml(rawCol2, '#333333', fontSize) : '',
+    col3_html:  rawCol3 ? makeParaHtml(rawCol3, '#333333', fontSize) : '',
     btn_text:   btnText,
     btn_url_utm: btnUrl,
     image_url:  imgUrl,
