@@ -2958,26 +2958,30 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 if el_txt == _subject_norm or el_txt_no_label == _subject_norm:
                     return  # duplicated subject — skip this element
         if el.name == 'table':
-            # Detect 2-column table structure first (before any flush)
+            # Detect 2-column table structure first (before any flush).
+            # Collect ALL rows (not just the first 2-cell one) — Google Docs
+            # represents "full-width text -> two columns -> full-width text"
+            # as ONE <table> with sibling <tr> rows: 1-cell rows (often
+            # colspan="2") wrapped around a genuine 2-cell row. We need every
+            # row so text in the 1-cell rows isn't silently dropped.
             tbody = el.find('tbody') or el
             trows = tbody.find_all('tr', recursive=False)
-            two_col_cells = None
-            for trow in trows:
-                rc = trow.find_all(['td', 'th'], recursive=False)
-                if len(rc) == 2:
-                    two_col_cells = rc
-                    break
+            row_cells_list = [rc for rc in
+                               (trow.find_all(['td', 'th'], recursive=False) for trow in trows)
+                               if rc]
+            has_two_col_row = any(len(rc) == 2 for rc in row_cells_list)
 
-            if not two_col_cells:
+            # Include <p> tags that contain an <img> even when they have no text content.
+            def _keep_tag(t):
+                if _is_reklama(t):
+                    return False
+                if t.get_text(strip=True):
+                    return True
+                # Empty-text <p> that wraps an image (Google Docs embeds images this way)
+                return t.name == 'p' and bool(t.find('img'))
+
+            if not has_two_col_row:
                 # Normal table: check for CTA button before deciding whether to flush
-                # Include <p> tags that contain an <img> even when they have no text content.
-                def _keep_tag(t):
-                    if _is_reklama(t):
-                        return False
-                    if t.get_text(strip=True):
-                        return True
-                    # Empty-text <p> that wraps an image (Google Docs embeds images this way)
-                    return t.name == 'p' and bool(t.find('img'))
                 inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                          if _keep_tag(t)]
                 has_inner_btn = bool(inner and any(
@@ -3023,87 +3027,124 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                             raw_blocks.append((row, meta))
                 return
 
-            # 2-column table: flush pending first, then process
+            # Table has at least one 2-column row: flush pending first, then
+            # walk every row in document order so 1-cell rows sitting next to
+            # the 2-col row (and any additional 2-col rows) all render too,
+            # instead of only the first 2-cell row being processed.
             flush_pending()
-            left_html,  left_btns,  left_btn_pos  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16, segment=segment)
-            right_html, right_btns, right_btn_pos = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16, segment=segment)
-            l_img = two_col_cells[0].find('img')
-            r_img = two_col_cells[1].find('img')
-            l_src = l_img.get('src', '') if l_img else ''
-            r_src = r_img.get('src', '') if r_img else ''
-            if l_src.startswith('data:image'):
-                yc_url = _upload_image_to_yc(l_src)
-                if yc_url:
-                    l_src = yc_url
-                    uploaded_urls.append(yc_url)
-            if r_src.startswith('data:image'):
-                yc_url = _upload_image_to_yc(r_src)
-                if yc_url:
-                    r_src = yc_url
-                    uploaded_urls.append(yc_url)
+            any_row_rendered = False
+            for rc in row_cells_list:
+                if len(rc) != 2:
+                    # 1-cell row (plain <td> or colspan="2") sitting next to a
+                    # 2-col row in the same <table> — Google Docs' way of
+                    # putting a full-width paragraph directly above/below a
+                    # two-column layout. Render it as a normal block instead
+                    # of silently dropping it. (Also covers the rare 3+-cell
+                    # row, by flattening all of that row's cells together.)
+                    row_inner = []
+                    for cell in rc:
+                        row_inner.extend(t for t in cell.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol']) if _keep_tag(t))
+                    if row_inner:
+                        any_row_rendered = True
+                        row_n, meta_n = render_block_from_tags(row_inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
+                        if row_n:
+                            raw_blocks.append((row_n, meta_n))
+                    continue
 
-            # Paragraphs after the button in the source doc must stay after the
-            # button in the output too — split each cell's text around its own
-            # button position instead of always rendering all text first.
-            left_pre, left_post = _split_paras_at(left_html, left_btn_pos)
-            right_pre, right_post = _split_paras_at(right_html, right_btn_pos)
+                two_col_cells = rc
+                left_html,  left_btns,  left_btn_pos  = _cell_para_html(two_col_cells[0], channel_key, campaign, date, font_size=16, segment=segment)
+                right_html, right_btns, right_btn_pos = _cell_para_html(two_col_cells[1], channel_key, campaign, date, font_size=16, segment=segment)
+                l_img = two_col_cells[0].find('img')
+                r_img = two_col_cells[1].find('img')
+                l_src = l_img.get('src', '') if l_img else ''
+                r_src = r_img.get('src', '') if r_img else ''
+                if l_src.startswith('data:image'):
+                    yc_url = _upload_image_to_yc(l_src)
+                    if yc_url:
+                        l_src = yc_url
+                        uploaded_urls.append(yc_url)
+                if r_src.startswith('data:image'):
+                    yc_url = _upload_image_to_yc(r_src)
+                    if yc_url:
+                        r_src = yc_url
+                        uploaded_urls.append(yc_url)
 
-            row = None
-            meta = None
-            post_text_parts = []
-            if left_html.strip() and right_html.strip():
-                pv = BeautifulSoup(left_pre or left_html, 'lxml').get_text(strip=True)[:50]
-                meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_pre,
-                        'col2_html': right_pre, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                row = block_2col_text_text(left_pre, right_pre)
-                post_text_parts = [left_post, right_post]
-            elif l_src and not left_html.strip() and right_html.strip():
-                img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else l_src
-                if user_img_idx[0] < len(images):
-                    user_img_idx[0] += 1
-                pv = BeautifulSoup(right_pre or right_html, 'lxml').get_text(strip=True)[:50]
-                meta = {'type': 'block_2col_img_text', 'paragraphs_html': right_pre,
-                        'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                row = block_2col_img_text(img_to_use, right_pre)
-                post_text_parts = [right_post]
-            elif r_src and not right_html.strip() and left_html.strip():
-                img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else r_src
-                if user_img_idx[0] < len(images):
-                    user_img_idx[0] += 1
-                pv = BeautifulSoup(left_pre or left_html, 'lxml').get_text(strip=True)[:50]
-                meta = {'type': 'block_2col_text_img', 'paragraphs_html': left_pre,
-                        'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                row = block_2col_text_img(left_pre, img_to_use)
-                post_text_parts = [left_post]
+                # Paragraphs after the button in the source doc must stay after the
+                # button in the output too — split each cell's text around its own
+                # button position instead of always rendering all text first.
+                left_pre, left_post = _split_paras_at(left_html, left_btn_pos)
+                right_pre, right_post = _split_paras_at(right_html, right_btn_pos)
 
-            if row:
-                raw_blocks.append((row, meta))
-                all_btns = left_btns + right_btns
-                post_text_html = '\n'.join(t for t in post_text_parts if t.strip())
-                for i, (btn_text, btn_url) in enumerate(all_btns):
-                    # Attach text that follows the button in the source doc to the
-                    # SAME white button block, instead of a separate block — but only
-                    # when there's exactly one button (unambiguous where it goes).
-                    attach_text = post_text_html if (len(all_btns) == 1 and post_text_html.strip()) else ''
-                    btn_preview = btn_text
-                    if attach_text:
-                        btn_preview += ' ' + BeautifulSoup(attach_text, 'lxml').get_text(strip=True)
-                    raw_blocks.append((
-                        block_button(btn_url, btn_text, attach_text),
-                        {'type': 'block_button', 'paragraphs_html': attach_text,
-                         'btn_text': btn_text, 'btn_url_utm': btn_url,
-                         'preview_text': btn_preview[:50]}
-                    ))
-                if post_text_html.strip() and len(all_btns) != 1:
-                    pv2 = BeautifulSoup(post_text_html, 'lxml').get_text(strip=True)[:50]
-                    raw_blocks.append((
-                        block_white(post_text_html),
-                        {'type': 'block_white', 'paragraphs_html': post_text_html,
-                         'btn_text': '', 'btn_url_utm': '', 'preview_text': pv2}
-                    ))
+                row = None
+                meta = None
+                post_text_parts = []
+                if left_html.strip() and right_html.strip():
+                    pv = BeautifulSoup(left_pre or left_html, 'lxml').get_text(strip=True)[:50]
+                    meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_pre,
+                            'col2_html': right_pre, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                    row = block_2col_text_text(left_pre, right_pre)
+                    post_text_parts = [left_post, right_post]
+                elif l_src and not left_html.strip() and right_html.strip():
+                    img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else l_src
+                    if user_img_idx[0] < len(images):
+                        user_img_idx[0] += 1
+                    pv = BeautifulSoup(right_pre or right_html, 'lxml').get_text(strip=True)[:50]
+                    meta = {'type': 'block_2col_img_text', 'paragraphs_html': right_pre,
+                            'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                    row = block_2col_img_text(img_to_use, right_pre)
+                    post_text_parts = [right_post]
+                elif r_src and not right_html.strip() and left_html.strip():
+                    img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else r_src
+                    if user_img_idx[0] < len(images):
+                        user_img_idx[0] += 1
+                    pv = BeautifulSoup(left_pre or left_html, 'lxml').get_text(strip=True)[:50]
+                    meta = {'type': 'block_2col_text_img', 'paragraphs_html': left_pre,
+                            'image_url': img_to_use, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
+                    row = block_2col_text_img(left_pre, img_to_use)
+                    post_text_parts = [left_post]
+
+                if row:
+                    any_row_rendered = True
+                    raw_blocks.append((row, meta))
+                    all_btns = left_btns + right_btns
+                    post_text_html = '\n'.join(t for t in post_text_parts if t.strip())
+                    for i, (btn_text, btn_url) in enumerate(all_btns):
+                        # Attach text that follows the button in the source doc to the
+                        # SAME white button block, instead of a separate block — but only
+                        # when there's exactly one button (unambiguous where it goes).
+                        attach_text = post_text_html if (len(all_btns) == 1 and post_text_html.strip()) else ''
+                        btn_preview = btn_text
+                        if attach_text:
+                            btn_preview += ' ' + BeautifulSoup(attach_text, 'lxml').get_text(strip=True)
+                        raw_blocks.append((
+                            block_button(btn_url, btn_text, attach_text),
+                            {'type': 'block_button', 'paragraphs_html': attach_text,
+                             'btn_text': btn_text, 'btn_url_utm': btn_url,
+                             'preview_text': btn_preview[:50]}
+                        ))
+                    if post_text_html.strip() and len(all_btns) != 1:
+                        pv2 = BeautifulSoup(post_text_html, 'lxml').get_text(strip=True)[:50]
+                        raw_blocks.append((
+                            block_white(post_text_html),
+                            {'type': 'block_white', 'paragraphs_html': post_text_html,
+                             'btn_text': '', 'btn_url_utm': '', 'preview_text': pv2}
+                        ))
+                else:
+                    # 2 cells but no recognizable text/image pattern for this
+                    # particular row — fall back to flat paragraph rendering
+                    # for just this row's content (doesn't affect other rows).
+                    inner = [t for t in two_col_cells[0].find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol']) if _keep_tag(t)] + \
+                            [t for t in two_col_cells[1].find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol']) if _keep_tag(t)]
+                    if inner:
+                        any_row_rendered = True
+                        row_f, meta_f = render_block_from_tags(inner, channel_key, campaign, date, segment, images=images, user_img_idx=user_img_idx, uploaded_urls=uploaded_urls)
+                        if row_f:
+                            raw_blocks.append((row_f, meta_f))
+
+            if any_row_rendered:
                 return
 
-            # 2-col detected but no pattern matched — fall back to normal table rendering
+            # 2-col detected but no row produced content — fall back to normal table rendering
             inner = [t for t in el.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol'])
                      if (t.get_text(strip=True) or (t.name == 'p' and t.find('img'))) and not _is_reklama(t)]
             if inner:
