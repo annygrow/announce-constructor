@@ -895,6 +895,7 @@ html, body {
 .block-type-badge.image          { background: rgba(50,200,100,.15);  color: #6ee49a; }
 .block-type-badge.col-2col-img-text,
 .block-type-badge.col-2col-text-text,
+.block-type-badge.col-2col-text-text-grey,
 .block-type-badge.col-3col-text  { background: rgba(180,100,240,.18); color: #d09cf5; }
 
 .block-preview-text {

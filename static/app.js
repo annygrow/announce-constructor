@@ -69,7 +69,8 @@ const BLOCK_LABELS = {
   block_image:          'Картинка',
   block_2col_img_text:  '2 колонки (фото+текст)',
   block_2col_text_img:  '2 колонки (текст+фото)',
-  block_2col_text_text: '2 колонки (текст+текст)',
+  block_2col_text_text: '2 колонки белые (текст+текст)',
+  block_2col_text_text_grey: '2 колонки серые (текст+текст)',
   block_3col_text:      '3 колонки',
 };
 
@@ -486,7 +487,7 @@ function createBlockCard(block, idx, channelKey, total) {
   const btnHasText = block.type === 'block_button' && (block.paragraphs_html || '').trim().length > 0;
   const isNoText  = block.type === 'block_spacer' || (block.type === 'block_button' && !btnHasText);
   const is3col    = block.type === 'block_3col_text';
-  const is2colTT  = block.type === 'block_2col_text_text';
+  const is2colTT  = block.type === 'block_2col_text_text' || block.type === 'block_2col_text_text_grey';
 
   const selectOpts = Object.entries(BLOCK_LABELS).map(([v, l]) =>
     `<option value="${v}"${block.type === v ? ' selected' : ''}>${l}</option>`
@@ -832,7 +833,7 @@ function saveBlockEdit(channelKey, idx) {
     block.preview_text = text.replace(/<[^>]+>/g, '').trim().substring(0, 80);
   }
 
-  if (['block_2col_text_text', 'block_3col_text'].includes(block.type)) {
+  if (['block_2col_text_text', 'block_2col_text_text_grey', 'block_3col_text'].includes(block.type)) {
     const ta2 = area.querySelector('.block-edit-col2');
     if (ta2) block.col2_html = makeParaHtml(ta2.value, '#333333', _fontSizeForBlockType(block.type));
   }
@@ -1028,7 +1029,7 @@ function toggleNewBlockFields(channelKey) {
   const text    = document.getElementById(`newtext-${channelKey}`);
   const col3    = document.getElementById(`newcol3-${channelKey}`);
 
-  if (cols) cols.style.display   = ['block_2col_text_text', 'block_3col_text'].includes(type) ? 'flex' : 'none';
+  if (cols) cols.style.display   = ['block_2col_text_text', 'block_2col_text_text_grey', 'block_3col_text'].includes(type) ? 'flex' : 'none';
   if (col3) col3.style.display   = type === 'block_3col_text' ? 'block' : 'none';
   if (btn)  btn.style.display    = ['block_blue_cta', 'block_button'].includes(type) ? 'flex' : 'none';
   if (img)  img.style.display    = ['block_image', 'block_2col_img_text', 'block_2col_text_img'].includes(type) ? 'block' : 'none';
@@ -1037,7 +1038,7 @@ function toggleNewBlockFields(channelKey) {
     const label2 = document.getElementById(`newcols-${channelKey}`)?.querySelector('textarea');
     if (label2) label2.placeholder = 'Текст второй колонки...';
   }
-  if (text) text.placeholder = type === 'block_2col_text_text' || type === 'block_3col_text' ? 'Текст первой колонки...' :
+  if (text) text.placeholder = type === 'block_2col_text_text' || type === 'block_2col_text_text_grey' || type === 'block_3col_text' ? 'Текст первой колонки...' :
                                 type === 'block_2col_img_text' ? 'Текст (правая колонка)...' :
                                 type === 'block_2col_text_img' ? 'Текст (левая колонка)...' :
                                 'Текст (каждый абзац — отдельная строка)...';
@@ -1048,7 +1049,7 @@ function toggleNewBlockFields(channelKey) {
 // blocks (_cell_para_html / block_2col_*), or editing+saving silently upsizes them.
 function _fontSizeForBlockType(type) {
   if (type === 'block_3col_text') return 14;
-  if (['block_2col_img_text', 'block_2col_text_img', 'block_2col_text_text'].includes(type)) return 16;
+  if (['block_2col_img_text', 'block_2col_text_img', 'block_2col_text_text', 'block_2col_text_text_grey'].includes(type)) return 16;
   return 18;
 }
 

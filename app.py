@@ -385,6 +385,7 @@ a { text-decoration:none; }
   .esdev-mso-td { display:block !important; width:100% !important; }
   .esdev-mso-table { width:100% !important; }
   .es-col-2, .es-col-3 { display:block !important; width:100% !important; padding:5px 0 !important; }
+  .es-col-gap { display:none !important; }
   .es-col-img { max-width:200px !important; width:auto !important; display:block; margin:0 auto; }
 }
 </style>
@@ -635,6 +636,39 @@ def block_2col_text_text(left_html, right_html):
         + f'\n</td>\n<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%;{col_style}">\n'
         + right_html
         + '\n</td>\n</tr>\n</table>\n</td></tr>'
+    )
+
+def block_2col_text_text_grey(left_html, right_html):
+    """Two equal text columns, each its own grey rounded box (same shade as
+    block_grey, #f0f1f3). Background/border-radius/padding live directly on
+    the outer <td class="es-col-2"> — NOT on a nested height:100% table.
+    Percentage heights only resolve against an ancestor with an explicit
+    (non-auto) height, so a nested table never actually inherited the outer
+    <td>'s real rendered height, and the two grey boxes could end up visibly
+    different heights when the two texts differ in length. The outer <td>
+    itself is guaranteed to match its row-sibling's height (native <tr>
+    behavior, no CSS trick needed) — painting the box style directly on it
+    makes the visible grey box match that height exactly.
+    A dedicated empty spacer <td> supplies the horizontal gap between boxes
+    (padding on the colored cells would paint that gap grey too, and on
+    mobile the spacer collapses via .es-col-gap so no empty gap remains).
+    """
+    col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
+    box_style = f"background-color:#f0f1f3;border-radius:8px;padding:12px 14px;width:50%;{col_style}"
+
+    def col_box(html):
+        return f'<td class="es-col-2" align="left" valign="top" style="{box_style}">\n{html}\n</td>'
+
+    gap = '<td class="es-col-gap" width="12" style="font-size:0;line-height:0">&nbsp;</td>'
+
+    return (
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
+        '<tr>\n'
+        + col_box(left_html)
+        + '\n' + gap + '\n'
+        + col_box(right_html)
+        + '\n</tr>\n</table>\n</td></tr>'
     )
 
 def block_3col_text(col1_html, col2_html, col3_html):
@@ -3080,9 +3114,15 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 post_text_parts = []
                 if left_html.strip() and right_html.strip():
                     pv = BeautifulSoup(left_pre or left_html, 'lxml').get_text(strip=True)[:50]
-                    meta = {'type': 'block_2col_text_text', 'paragraphs_html': left_pre,
+                    # Both columns are plain text, no images — always the
+                    # grey-box variant (each column its own rounded grey card)
+                    # by default. This is a fixed choice, not part of the
+                    # white/grey/dotted alternation cycle below (the white
+                    # 2-col variant remains available only for manual
+                    # selection in the block editor).
+                    meta = {'type': 'block_2col_text_text_grey', 'paragraphs_html': left_pre,
                             'col2_html': right_pre, 'btn_text': '', 'btn_url_utm': '', 'preview_text': pv}
-                    row = block_2col_text_text(left_pre, right_pre)
+                    row = block_2col_text_text_grey(left_pre, right_pre)
                     post_text_parts = [left_post, right_post]
                 elif l_src and not left_html.strip() and right_html.strip():
                     img_to_use = images[user_img_idx[0]] if user_img_idx[0] < len(images) else l_src
@@ -3213,9 +3253,13 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
 
     # Auto-alternate simple blocks in a 3-step cycle: white → grey → dotted → white → …
     # Non-alternatable blocks influence cycle position:
-    #   CTA (blue)  → resets cycle to 0 (next plain block starts at white)
-    #   2-col/image → count as white, so next plain block becomes grey (pos=1)
-    #   button      → transparent, doesn't affect the cycle
+    #   CTA (blue)             → resets cycle to 0 (next plain block starts at white)
+    #   block_2col_text_text_grey → counts as GREY (it always renders grey by
+    #                             fixed default, not part of the alternation
+    #                             itself), so the next plain block skips ahead
+    #                             to dotted instead of repeating grey right after it
+    #   img 2-col/image        → count as white, so next plain block becomes grey (pos=1)
+    #   button                 → transparent, doesn't affect the cycle
     ALTERNATABLE = {'block_white', 'block_grey', 'block_dotted'}
     _CYCLE = ['block_white', 'block_grey', 'block_dotted']
     _CYCLE_FN = {'block_white': block_white, 'block_grey': block_grey, 'block_dotted': block_dotted}
@@ -3234,8 +3278,10 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 raw_blocks[i] = (_CYCLE_FN[new_type](ph), curr_meta)
         elif curr_type == 'block_blue_cta':
             cycle_pos = 0  # next plain block starts fresh at white
+        elif curr_type == 'block_2col_text_text_grey':
+            cycle_pos = 2  # counts as grey → next plain block goes to dotted, not grey again
         elif curr_type.startswith('block_2col') or curr_type in ('block_image', 'block_image_text'):
-            cycle_pos = 1  # 2-col/image counts as white → next plain block is grey
+            cycle_pos = 1  # img 2-col/image/white 2-col counts as white → next plain block is grey
         # block_button is transparent — doesn't affect the cycle
 
     # Handle adjacent block_blue_cta: convert the second into block_white + block_button
@@ -4410,6 +4456,8 @@ def api_assemble_email():
             row = block_2col_text_img(ph, block.get('image_url', ''))
         elif btype == 'block_2col_text_text':
             row = block_2col_text_text(ph, block.get('col2_html', ''))
+        elif btype == 'block_2col_text_text_grey':
+            row = block_2col_text_text_grey(ph, block.get('col2_html', ''))
         elif btype == 'block_3col_text':
             row = block_3col_text(ph, block.get('col2_html', ''), block.get('col3_html', ''))
         else:
