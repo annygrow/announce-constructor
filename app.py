@@ -654,16 +654,20 @@ def block_2col_text_text_grey(left_html, right_html):
     mobile the spacer collapses via .es-col-gap so no empty gap remains).
     """
     col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
-    box_style = f"background-color:#f0f1f3;border-radius:8px;padding:12px 14px;width:50%;{col_style}"
+    # width:49% (not 50%) leaves room for the 2%-wide gap column so the three
+    # declared widths sum to exactly 100% — at 50%+50%+2% the browser's table
+    # layout honored both 50% cells in full and collapsed the gap <td> to 0,
+    # visually gluing the two boxes together with no space between them.
+    box_style = f"background-color:#f0f1f3;border-radius:8px;padding:12px 14px;width:49%;{col_style}"
 
     def col_box(html):
         return f'<td class="es-col-2" align="left" valign="top" style="{box_style}">\n{html}\n</td>'
 
-    gap = '<td class="es-col-gap" width="12" style="font-size:0;line-height:0">&nbsp;</td>'
+    gap = '<td class="es-col-gap" width="2%" style="font-size:0;line-height:0">&nbsp;</td>'
 
     return (
         '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
-        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
+        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;table-layout:fixed">\n'
         '<tr>\n'
         + col_box(left_html)
         + '\n' + gap + '\n'
@@ -3271,7 +3275,14 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
         curr_type = curr_meta.get('type', '')
         if curr_type in ALTERNATABLE:
             new_type = _CYCLE[cycle_pos % 3]
-            cycle_pos += 1
+            # The 2-col text block is always grey (fixed, not part of this
+            # cycle) — if THIS block would also land on grey right before
+            # it, the two grey boxes touch with no visual separation.
+            next_meta = raw_blocks[i + 1][1] if i + 1 < len(raw_blocks) else None
+            next_type = next_meta.get('type', '') if next_meta else ''
+            if new_type == 'block_grey' and next_type == 'block_2col_text_text_grey':
+                new_type = 'block_white'
+            cycle_pos = {'block_white': 1, 'block_grey': 2, 'block_dotted': 3}[new_type]
             if new_type != curr_type:
                 ph = curr_meta.get('paragraphs_html', '')
                 curr_meta['type'] = new_type
