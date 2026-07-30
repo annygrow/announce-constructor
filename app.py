@@ -378,7 +378,7 @@ EMAIL_WRAPPER_START = '''<!DOCTYPE html>
 body { margin:0; padding:0; }
 img { border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; }
 a { text-decoration:none; }
-@media only screen and (max-width:600px) {
+@media only screen and (max-device-width:600px), only screen and (max-width:600px) {
   .es-content-body { width:100% !important; }
   .es-footer-body { width:100% !important; }
   .es-left, .es-right { float:none !important; width:100% !important; }
@@ -585,43 +585,71 @@ def _is_portrait_image(image_url, threshold=1.3):
     w, h = size
     return (h / w) > threshold
 
+_COL_IMG_WIDTH = 210
+
 def _col_img_style(image_url):
     """Style for a 2-col block image: cap by height if portrait so it doesn't
     tower over a short text column, otherwise fill the column width as usual."""
     if _is_portrait_image(image_url):
         return "display:block;border:0;max-height:220px;width:auto;max-width:100%;border-radius:8px;margin:0 auto"
-    return "display:block;border:0;width:100%;max-width:260px;border-radius:8px"
+    return f"display:block;border:0;width:100%;max-width:{_COL_IMG_WIDTH}px;border-radius:8px"
+
+def _col_img_width_attr(image_url):
+    """HTML width="" attribute for the <img> (skipped for portrait images,
+    which size by max-height instead — a fixed width attribute would fight
+    with their width:auto style). See block_2col_img_text for why this
+    attribute matters."""
+    return '' if _is_portrait_image(image_url) else f' width="{_COL_IMG_WIDTH}"'
+
+_COL_TEXT_WIDTH = 560 - _COL_IMG_WIDTH - 12  # 560 = 600px design width minus 20px*2 outer padding
 
 def block_2col_img_text(image_url, text_html):
-    """Two-column block: image left, text right."""
+    """Two-column block: image left, text right.
+
+    Built with inline-block <div> columns (fixed px widths), NOT a <table>
+    with <td> cells. GetCourse's mailing editor inserts submitted "Исходный
+    код" as a body fragment inside its own template rather than as a
+    standalone document, so a <style> block placed there (including the
+    .es-col-2 mobile media query) ends up outside any real <head> — verified
+    via "Show original" on real delivered Gmail test sends that neither the
+    media query, table-layout:fixed, nor HTML width="" attributes ever
+    affected the render, across 6 independent attempts. inline-block needs
+    none of that: two fixed-width divs that together exceed the container's
+    real width simply wrap the second one onto its own line, the same way a
+    long word wraps in a paragraph — no @media, no table column algorithm,
+    just baseline inline layout every renderer implements. Whitespace is
+    deliberately omitted between the two </div>/<div> tags below: inline-
+    block elements render source whitespace between them as a visible gap.
+    """
     col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
     img_style = _col_img_style(image_url)
+    img_w = _col_img_width_attr(image_url)
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
-        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
-        '<tr>\n'
-        '<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%">\n'
-        f'<img src="{image_url}" alt="" class="es-col-img" style="{img_style}">\n'
-        '</td>\n'
-        f'<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%;{col_style}">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff;font-size:0">\n'
+        f'<div style="display:inline-block;vertical-align:top;width:{_COL_IMG_WIDTH + 12}px;box-sizing:border-box;padding-right:12px;font-size:16px">'
+        f'<img src="{image_url}" alt=""{img_w} class="es-col-img" style="{img_style}">'
+        '</div>'
+        f'<div style="display:inline-block;vertical-align:top;width:{_COL_TEXT_WIDTH}px;max-width:100%;box-sizing:border-box;{col_style}">'
         + text_html
-        + '\n</td>\n</tr>\n</table>\n</td></tr>'
+        + '</div>'
+        '\n</td></tr>'
     )
 
 def block_2col_text_img(text_html, image_url):
-    """Two-column block: text left, image right."""
+    """Two-column block: text left, image right. See block_2col_img_text for
+    why this uses inline-block <div> columns instead of a <table>."""
     col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
     img_style = _col_img_style(image_url)
+    img_w = _col_img_width_attr(image_url)
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
-        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
-        '<tr>\n'
-        f'<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%;{col_style}">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff;font-size:0">\n'
+        f'<div style="display:inline-block;vertical-align:top;width:{_COL_TEXT_WIDTH}px;max-width:100%;box-sizing:border-box;{col_style}">'
         + text_html
-        + '\n</td>\n'
-        '<td class="es-col-2" align="left" valign="top" style="padding-left:12px;width:50%">\n'
-        f'<img src="{image_url}" alt="" class="es-col-img" style="{img_style}">\n'
-        '</td>\n</tr>\n</table>\n</td></tr>'
+        + '</div>'
+        f'<div style="display:inline-block;vertical-align:top;width:{_COL_IMG_WIDTH + 12}px;box-sizing:border-box;padding-left:12px;font-size:16px">'
+        f'<img src="{image_url}" alt=""{img_w} class="es-col-img" style="{img_style}">'
+        '</div>'
+        '\n</td></tr>'
     )
 
 def block_2col_text_text(left_html, right_html):
@@ -629,7 +657,7 @@ def block_2col_text_text(left_html, right_html):
     col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
     return (
         '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
-        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
+        '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;table-layout:fixed">\n'
         '<tr>\n'
         f'<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%;{col_style}">\n'
         + left_html
