@@ -980,6 +980,18 @@ def is_section_header(tag, ai_hints=None):
     if any(text.startswith(kw) for kw in preview_kw):
         return 'preview'
 
+    # Merged header where a numbered/label prefix (e.g. "4. КОНТЕНТ") precedes the
+    # real "почта (...)"/"тг (...)" label in the same <br>-glued paragraph, followed
+    # by Отправитель:/Тема: meta lines that push the whole blob past the length guard
+    # below before the first-word checks above ever get a chance to match. These
+    # markers include an opening paren, which essentially never appears in ordinary
+    # body sentences, so a plain substring search is safe even on long glued text.
+    # Must run BEFORE the length guard for the same reason as the checks above.
+    header_paren_kw = ['почта (', 'тг (', 'телеграм (', 'telegram (']
+    for kw in header_paren_kw:
+        if kw in text:
+            return 'tg_section' if kw != 'почта (' else 'email_section'
+
     # Section headers are short labels, not body sentences
     if len(text) > 120:
         return None
@@ -1709,7 +1721,7 @@ def parse_doc_html(html_content, ai_hints=None):
             via <br><br> into one <p> by Google Docs — loses only the label/meta
             lines and keeps the real sentence instead of discarding the whole tag.
             """
-            nonlocal subject, preview
+            nonlocal subject, preview, sender
             children = list(tag_copy.children)
             groups = []  # list of (children_in_group, joined_raw_text)
             group_children, group_text_parts = [], []
@@ -1742,6 +1754,21 @@ def parse_doc_html(html_content, ai_hints=None):
                 if m_prev:
                     if not preview:
                         preview = m_prev.group(1).strip()
+                    to_remove.extend(grp_children)
+                    continue
+                # "Отправитель:"/"От кого:" meta-line — same class of bug as Тема:/
+                # Прехедер: above: when Google Docs glues this label onto the merged
+                # header paragraph (label-stripping loop above only strips the channel
+                # label itself, not this line), it used to be treated as "real content"
+                # and leak into the email body instead of being consumed as metadata.
+                m_sender = re.match(r'^(?:от\s+кого|отправитель)\s*:\s*(.+)', text, re.IGNORECASE)
+                if m_sender:
+                    if not sender:
+                        val = m_sender.group(1).strip()
+                        val = re.sub(r'\s*тема(?:\s+письма)?\s*:.*$', '', val, flags=re.IGNORECASE).strip()
+                        if 'зерокодер' not in val.lower():
+                            val = val + ' из Зерокодера'
+                        sender = val
                     to_remove.extend(grp_children)
                     continue
                 break  # first real content group — stop consuming, keep it and the rest
@@ -2133,7 +2160,14 @@ def parse_doc_html(html_content, ai_hints=None):
     for item in all_items:
         m = re.match(r'^тег\s+активности\s*[:\s]\s*(.+)', item, re.IGNORECASE)
         if m and not doc_campaign:
-            doc_campaign = m.group(1).strip()
+            # Google Docs sometimes glues "Тег активности: slug" and "Дата отправки: ..."/
+            # "Время отправки: ..." into one <p> via <br> (same class of bug as the
+            # Отправитель:/Тема: header fix above) — trim the glued-on trailing label(s)
+            # instead of letting them ride along into the campaign slug (and from there
+            # into utm_campaign on every generated link).
+            val = m.group(1).strip()
+            val = re.sub(r'\s*(?:дата\s+отправки|время\s+отправки)\s*:.*$', '', val, flags=re.IGNORECASE).strip()
+            doc_campaign = val
         m2 = re.match(r'^дата\s+отправки\s*[:\s]\s*(.+)', item, re.IGNORECASE)
         if m2 and not doc_date:
             doc_date = _norm_date(m2.group(1).strip())
@@ -2550,6 +2584,62 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
                         remaining = tag_copy.get_text(strip=True).replace('\xa0', '').strip()
                         if remaining:
                             items.append({'kind': 'tag', 'tag': tag_copy})
+                    continue
+
+        # Case 1.6: bracket-only SPAN at ANY position among the tag's direct child
+        # spans, not just first (Case 1.5 only looks at the first span) — e.g. intro
+        # text followed by a bracketed button: "Текст...<br>[КНОПКА]". The bracket has
+        # no <a href> (just highlighted placeholder text — the real link gets added
+        # later in the block editor), so Case 2 below (anchor-based) can't catch it
+        # either. Splits the tag's other spans into pre/post-text items around the
+        # button, mirroring the pre/post split Case 2 already does for anchor-wrapped
+        # buttons, so text before AND after the button survive in the same CTA block
+        # instead of the whole paragraph falling through to plain text with literal
+        # brackets still showing.
+        if tag.name == 'p':
+            direct_spans = tag.find_all('span', recursive=False)
+            btn_span_idx = next(
+                (i for i, sp in enumerate(direct_spans)
+                 if _BTN_BRACKET_RE.match(_strip_button_footnotes(sp.get_text(strip=True)))),
+                None
+            )
+            if btn_span_idx is not None:
+                m_sp = _BTN_BRACKET_RE.match(_strip_button_footnotes(direct_spans[btn_span_idx].get_text(strip=True)))
+                sp_prefix = m_sp.group(1).strip()
+                sp_inner = m_sp.group(2).strip()
+                btn_label = f'{sp_prefix} {sp_inner}'.strip() if sp_prefix else sp_inner
+                a_inside = direct_spans[btn_span_idx].find('a', href=True)
+                btn_href = a_inside.get('href', '#') if a_inside else '#'
+
+                tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                copy_spans = tag_copy.find_all('span', recursive=False) if tag_copy else []
+                btn_span_copy = copy_spans[btn_span_idx] if btn_span_idx < len(copy_spans) else None
+                if btn_span_copy is not None:
+                    pre_children, post_children = [], []
+                    bucket = pre_children
+                    for child in list(tag_copy.children):
+                        if child is btn_span_copy:
+                            bucket = post_children
+                            continue
+                        bucket.append(child)
+
+                    def _build_side_tag(children, _tag_copy=tag_copy):
+                        if not children:
+                            return None
+                        side = BeautifulSoup(f'<{_tag_copy.name}></{_tag_copy.name}>', 'lxml').find(_tag_copy.name)
+                        side.attrs = dict(_tag_copy.attrs)
+                        for c in children:
+                            side.append(c.extract() if hasattr(c, 'extract') else c)
+                        return side if _strip_trailing_footnotes(side.get_text(strip=True)) else None
+
+                    pre_tag = _build_side_tag(pre_children)
+                    post_tag = _build_side_tag(post_children)
+                    if pre_tag is not None:
+                        items.append({'kind': 'tag', 'tag': pre_tag})
+                    if not _btn_already_exists(btn_label):
+                        items.append({'kind': 'btn', 'text': btn_label, 'url': btn_href})
+                    if post_tag is not None:
+                        items.append({'kind': 'tag', 'tag': post_tag})
                     continue
 
         # Case 2: an <a> inside the tag wraps [BUTTON TEXT] (possibly with emoji before <a>)
