@@ -387,6 +387,8 @@ a { text-decoration:none; }
   .es-col-2, .es-col-3 { display:block !important; width:100% !important; padding:5px 0 !important; }
   .es-col-gap { display:none !important; }
   .es-col-img { max-width:200px !important; width:auto !important; display:block; margin:0 auto; }
+  .es-fs-18 { font-size:16px !important; line-height:24px !important; }
+  .es-fs-16 { font-size:15px !important; line-height:22px !important; }
 }
 </style>
 </head>
@@ -3077,6 +3079,22 @@ def _split_paras_at(html_str, position):
     post = '\n'.join(paras_html[position:])
     return pre, post
 
+def _add_mobile_font_classes(html):
+    """Tag <p style="...font-size:18px..."> / font-size:16px paragraphs with a
+    class (es-fs-18 / es-fs-16) so the @media block in EMAIL_WRAPPER_START can
+    shrink body/CTA text and 2-col text on mobile via a single CSS rule,
+    instead of threading a mobile-specific font_size through every paragraph
+    generator (tag_to_email_p, the CTA renderer, the list-item builders,
+    _cell_para_html, ...). Headings, buttons, and footer/legal text (built
+    outside content_table) are untouched since they don't match 18/16."""
+    def _inject(m):
+        style = m.group(1)
+        fs_match = re.search(r'font-size:(\d+)px', style)
+        if not fs_match or fs_match.group(1) not in ('18', '16'):
+            return m.group(0)
+        return f'<p class="es-fs-{fs_match.group(1)}" style="{style}"'
+    return re.sub(r'<p style="([^"]*)"', _inject, html)
+
 def generate_email_html(email_section_html, channel_key, campaign, date, images, subject='', segment=''):
     """
     Build the complete email HTML from parsed section HTML.
@@ -3473,6 +3491,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
         + '\n'.join(content_rows)
         + '\n</table>'
     )
+    content_table = _add_mobile_font_classes(content_table)
 
     logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
     subject_safe = subject or 'Рассылка ZeroCoder'
@@ -4602,6 +4621,7 @@ def api_assemble_email():
         + '\n'.join(content_rows)
         + '\n</table>'
     )
+    content_table = _add_mobile_font_classes(content_table)
     logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
     subject_safe = subject or 'Рассылка ZeroCoder'
     ad_block = EMAIL_AD_DISCLAIMER if channel_key == 'email_unisender' else ''
