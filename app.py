@@ -375,12 +375,11 @@ EMAIL_WRAPPER_START = '''<!DOCTYPE html>
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <title>{subject}</title>
 <style type="text/css">
-body { margin:0; padding:0; }
+body { margin:0; padding:0; -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; text-size-adjust:100%; }
+table, td { -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; text-size-adjust:100%; }
 img { border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; }
 a { text-decoration:none; }
 @media only screen and (max-device-width:600px), only screen and (max-width:600px) {
-  .es-content-body { width:100% !important; }
-  .es-footer-body { width:100% !important; }
   .es-left, .es-right { float:none !important; width:100% !important; }
   .esdev-mso-td { display:block !important; width:100% !important; }
   .esdev-mso-table { width:100% !important; }
@@ -395,7 +394,7 @@ a { text-decoration:none; }
 <tr><td valign="top" style="padding:0;margin:0">'''
 
 EMAIL_HEADER = '''
-<table cellpadding="0" cellspacing="0" align="center" role="none" style="border-collapse:collapse;border-spacing:0;width:600px;background-color:#f6f6f6">
+<table cellpadding="0" cellspacing="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:430px;background-color:#f6f6f6">
 <tr><td align="left" bgcolor="#f6f6f6" style="padding:0 20px;margin:0;background-color:#f6f6f6">
 <table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">
 <tr><td align="center" style="padding:10px;margin:0;font-size:0px">
@@ -408,7 +407,7 @@ EMAIL_HEADER = '''
 '''
 
 EMAIL_FOOTER = '''
-<table class="es-footer-body" cellspacing="0" cellpadding="0" align="center" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#333333;width:600px">
+<table class="es-footer-body" cellspacing="0" cellpadding="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#333333;width:100%;max-width:600px;min-width:430px">
 <tr><td align="left" style="padding:20px 20px 10px;margin:0">
 <table cellpadding="0" cellspacing="0" class="es-left" align="left" role="none" style="border-collapse:collapse;border-spacing:0;float:left;width:270px">
 <tr><td align="left" style="padding:0;margin:0;width:270px">
@@ -441,7 +440,7 @@ EMAIL_FOOTER = '''
 '''
 
 EMAIL_AD_DISCLAIMER = '''
-<table cellspacing="0" cellpadding="0" align="center" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#ffffff;width:600px">
+<table cellspacing="0" cellpadding="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#ffffff;width:100%;max-width:600px;min-width:430px">
 <tr><td align="center" style="padding:16px 20px 16px;margin:0">
 <p style="margin:0 0 4px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:16px;color:#999999;font-size:11px">РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>
 <p style="margin:0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:16px;color:#999999;font-size:11px">ИНН 9715401631</p>
@@ -473,7 +472,7 @@ def _style_block_image_html(image_url):
 
 def block_white(paragraphs_html, image_url=''):
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;margin:0;background-color:#ffffff">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;margin:0;background-color:#ffffff">\n'
         + _style_block_image_html(image_url)
         + paragraphs_html
         + '\n</td></tr>'
@@ -481,7 +480,7 @@ def block_white(paragraphs_html, image_url=''):
 
 def block_grey(paragraphs_html, image_url=''):
     return (
-        '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+        '<tr><td style="padding:5px 6px 10px;margin:0;background-color:#ffffff">\n'
         '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #f0f1f3;border-radius:20px" role="presentation">\n'
         '<tr><td align="left" bgcolor="#f0f1f3" style="padding:10px 15px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#333333">\n'
         + _style_block_image_html(image_url)
@@ -501,7 +500,7 @@ def block_dotted(paragraphs_html, image_url=''):
 
 def block_blue_cta(text_html, button_url, button_text):
     return (
-        '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+        '<tr><td style="padding:5px 6px 10px;margin:0;background-color:#ffffff">\n'
         '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
         '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px 5px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#ffffff">\n'
         + text_html
@@ -513,14 +512,14 @@ def block_blue_cta(text_html, button_url, button_text):
 
 def block_image_center(image_url):
     return (
-        '<tr><td align="center" bgcolor="#ffffff" style="padding:10px 20px;margin:0;background-color:#ffffff;font-size:0px">\n'
+        '<tr><td align="center" bgcolor="#ffffff" style="padding:10px 12px;margin:0;background-color:#ffffff;font-size:0px">\n'
         f'<img src="{image_url}" alt="" width="560" style="display:block;border:0;max-width:100%;border-radius:10px">\n'
         '</td></tr>'
     )
 
 def block_image_with_text(image_url, paragraphs_html):
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;margin:0;background-color:#ffffff">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;margin:0;background-color:#ffffff">\n'
         f'<div style="text-align:center;font-size:0px;padding-bottom:10px">'
         f'<img src="{image_url}" alt="" style="display:inline-block;border:0;max-width:100%;border-radius:10px">'
         f'</div>\n'
@@ -531,7 +530,7 @@ def block_image_with_text(image_url, paragraphs_html):
 def block_blue_text(paragraphs_html, image_url=''):
     """Blue block without a CTA button."""
     return (
-        '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+        '<tr><td style="padding:5px 6px 10px;margin:0;background-color:#ffffff">\n'
         '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
         '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#ffffff">\n'
         + _style_block_image_html(image_url)
@@ -641,7 +640,7 @@ def block_2col_img_text(image_url, text_html):
     img_style = _col_img_style(image_url)
     img_w = _col_img_width_attr(image_url)
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff;font-size:0">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff;font-size:0">\n'
         f'<div style="display:inline-block;vertical-align:top;width:{_COL_IMG_WIDTH + 12}px;box-sizing:border-box;padding-right:12px;font-size:16px">'
         f'<img src="{image_url}" alt=""{img_w} class="es-col-img" style="{img_style}">'
         '</div>'
@@ -658,7 +657,7 @@ def block_2col_text_img(text_html, image_url):
     img_style = _col_img_style(image_url)
     img_w = _col_img_width_attr(image_url)
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff;font-size:0">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff;font-size:0">\n'
         f'<div style="display:inline-block;vertical-align:top;width:{_COL_TEXT_WIDTH}px;max-width:100%;box-sizing:border-box;{col_style}">'
         + text_html
         + '</div>'
@@ -672,7 +671,7 @@ def block_2col_text_text(left_html, right_html):
     """Two equal text columns."""
     col_style = "font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;font-size:16px;line-height:24px;color:#333333"
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff">\n'
         '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;table-layout:fixed">\n'
         '<tr>\n'
         f'<td class="es-col-2" align="left" valign="top" style="padding-right:12px;width:50%;{col_style}">\n'
@@ -710,7 +709,7 @@ def block_2col_text_text_grey(left_html, right_html):
     gap = '<td class="es-col-gap" width="2%" style="font-size:0;line-height:0">&nbsp;</td>'
 
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff">\n'
         '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;table-layout:fixed">\n'
         '<tr>\n'
         + col_box(left_html)
@@ -732,7 +731,7 @@ def block_3col_text(col1_html, col2_html, col3_html):
         )
 
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;background-color:#ffffff">\n'
+        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff">\n'
         '<table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">\n'
         '<tr>\n'
         + col_box(col1_html, 'padding-right:6px')
@@ -2949,7 +2948,7 @@ def render_block_from_tags(tags, channel_key, campaign, date, segment='', images
             )
 
         html = (
-            '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+            '<tr><td style="padding:5px 6px 10px;margin:0;background-color:#ffffff">\n'
             '<table cellspacing="0" cellpadding="0" width="100%" '
             'style="border-collapse:separate;border-spacing:0;border:10px solid #1445ea;border-radius:20px" '
             'role="presentation">\n'
@@ -3211,6 +3210,26 @@ def _add_mobile_font_classes(html):
         style = style.replace(f'font-size:{fs_from}px', f'font-size:{fs_to}px')
         style = re.sub(rf'line-height:{lh_from}px\b', f'line-height:{lh_to}px', style)
         return f'<p style="{style}"'
+    return re.sub(r'<p style="([^"]*)"', _inject, html)
+
+_TEXT_SIZE_ADJUST = '-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%;text-size-adjust:100%;'
+
+def _disable_text_size_adjust(html):
+    """Gmail's iOS/Android apps auto-boost font-size on emails that don't
+    explicitly opt out via text-size-adjust — inflating declared px sizes at
+    render time, which is why the exact same HTML wraps onto extra lines in
+    Gmail but not in Yandex Mail (which doesn't apply this boost) or in
+    ESP-authored mail (every professional template sets this reset). This is
+    the standard "bulletproof email" fix for that specific Gmail behavior.
+
+    Set as a document-wide <style> rule too, but written inline on every
+    <p style="..."> here so it survives even where GetCourse strips/relocates
+    <head>/<style> (same reasoning as _add_mobile_font_classes)."""
+    def _inject(m):
+        style = m.group(1)
+        if 'text-size-adjust' in style:
+            return m.group(0)
+        return f'<p style="{_TEXT_SIZE_ADJUST}{style}"'
     return re.sub(r'<p style="([^"]*)"', _inject, html)
 
 def generate_email_html(email_section_html, channel_key, campaign, date, images, subject='', segment=''):
@@ -3604,8 +3623,8 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                             'preview_text': 'Картинка'})
 
     content_table = (
-        '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" '
-        'role="none" style="border-collapse:collapse;border-spacing:0;width:600px;background-color:#ffffff">\n'
+        '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" width="100%" '
+        'role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:430px;background-color:#ffffff">\n'
         + '\n'.join(content_rows)
         + '\n</table>'
     )
@@ -3623,6 +3642,7 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
         + ad_block
         + EMAIL_WRAPPER_END
     )
+    html = _disable_text_size_adjust(html)
     return html, blocks_data, uploaded_urls
 
 # ---------------------------------------------------------------------------
@@ -4699,7 +4719,7 @@ def api_assemble_email():
                     .replace('style="padding:8px 0 12px;margin:0"', 'style="padding:8px 0 18px;margin:0"', 1)
                 )
             row = (
-                '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
+                '<tr><td style="padding:5px 6px 10px;margin:0;background-color:#ffffff">\n'
                 '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;'
                 'border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
                 + '\n'.join(inner_cta_rows) + '\n'
@@ -4734,8 +4754,8 @@ def api_assemble_email():
         content_rows.append(row)
 
     content_table = (
-        '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" '
-        'role="none" style="border-collapse:collapse;border-spacing:0;width:600px;background-color:#ffffff">\n'
+        '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" width="100%" '
+        'role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:430px;background-color:#ffffff">\n'
         + '\n'.join(content_rows)
         + '\n</table>'
     )
@@ -4751,6 +4771,7 @@ def api_assemble_email():
         + ad_block
         + EMAIL_WRAPPER_END
     )
+    html = _disable_text_size_adjust(html)
     return jsonify({'html': html})
 
 
