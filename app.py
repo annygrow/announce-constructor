@@ -1055,18 +1055,117 @@ def is_section_header(tag, ai_hints=None):
     return None
 
 
+def _split_merged_label_tag(tag, _match_label):
+    """
+    Shared core for _get_trailing_email_label/_get_trailing_tg_label. Detects a
+    merged Google Docs paragraph where a section label sits between real content
+    before it and (optionally) real content after it, all inside one <p>,
+    separated by <br/> line-breaks spread arbitrarily across sibling spans.
+    Example DOM shapes:
+        <p> <span>CTA button text</span> <span><br/><br/></span>
+            <span>Другие источники</span> </p>
+        <p> <span>...РЕКЛАМА...</span> <span><br/><br/><br/></span>
+            <span>БОТ (общий)<br/></span>
+            <span><br/>Первая строка нового варианта...</span> </p>
+
+    `_match_label(candidate_children)` returns the clean label text if the
+    joined text of candidate_children matches the caller's label pattern
+    (with its own length guard), else None.
+
+    Returns (label_name, pre_content_tag, post_content_tag) when detected,
+    otherwise None. pre_content_tag/post_content_tag are copies of the
+    original tag with everything except that side's content removed; either
+    may be None if there is nothing on that side.
+    """
+    if not tag.find('br'):
+        return None
+
+    children = list(tag.children)
+
+    pre_end = None    # index where content-before-label ends (label starts here)
+    label_end = None  # index where the label itself ends (post content starts here)
+    post_text = None
+
+    # Candidate 0: a single child whose OWN text (in isolation) is the label,
+    # regardless of what siblings before/after it contain. Needed when the
+    # content AFTER the label is a separate sibling span that carries its own
+    # leading <br/> (blank line after the label) — in that shape, "last child
+    # with a <br/>" (candidate 1 below) latches onto the content span instead
+    # of the label span, since the content span has a <br/> of its own too.
+    for i, child in enumerate(children):
+        candidate = _match_label([child])
+        if candidate is not None:
+            pre_end, label_end, post_text = i, i + 1, candidate
+            break
+
+    # Candidate 1: split right after the LAST direct child that contains a <br/>
+    # anywhere in it (the common shape: "...content...<br/>Label", label in its
+    # own following span(s) with no <br/> of its own — nothing follows it).
+    if pre_end is None:
+        last_br_child_idx = -1
+        for i, child in enumerate(children):
+            if hasattr(child, 'find') and child.find('br'):
+                last_br_child_idx = i
+        if last_br_child_idx >= 0:
+            candidate = _match_label(children[last_br_child_idx + 1:])
+            if candidate is not None:
+                pre_end = label_end = last_br_child_idx + 1
+                post_text = candidate
+
+    # Candidate 2 (fallback): the label span itself carries its own trailing
+    # <br/> artifact (a common Google Docs export quirk), so it matched the
+    # <br/> scan above and became the "separator" itself, leaving nothing after
+    # it to treat as the label. Retry with the very last child in isolation.
+    if pre_end is None and len(children) >= 2:
+        candidate = _match_label(children[-1:])
+        if candidate is not None:
+            pre_end = label_end = len(children) - 1
+            post_text = candidate
+
+    if pre_end is None:
+        return None
+
+    # Require non-empty content BEFORE the label
+    pre_text = ''.join(
+        c.get_text() if hasattr(c, 'get_text') else str(c)
+        for c in children[:pre_end]
+    ).strip()
+    if not pre_text:
+        return None
+
+    # Build a copy of the tag with only the pre-label content, cut at the same
+    # child index (re-parsing the same serialized string yields identical
+    # child structure/order).
+    pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+    if pre_tag:
+        pre_children_copy = list(pre_tag.children)
+        for child in pre_children_copy[pre_end:]:
+            child.extract()
+
+    # Build a copy of the tag with only the post-label content (if any) — the
+    # first line(s) of the NEW section that were glued onto the same <p> as
+    # the label instead of starting a fresh paragraph.
+    post_tag = None
+    if label_end < len(children):
+        post_candidate = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+        if post_candidate:
+            post_children_copy = list(post_candidate.children)
+            for child in post_children_copy[:label_end]:
+                child.extract()
+            if get_text_content(post_candidate).strip():
+                post_tag = post_candidate
+
+    return (post_text.strip(), pre_tag, post_tag)
+
+
 def _get_trailing_email_label(tag):
     """
     Detects a merged Google Docs paragraph where body content and an email
     section label (e.g. "Другие источники") share a single <p> tag, separated
-    by <br/> line-breaks.  Example DOM shape:
-        <p> <span>CTA button text</span> <span><br/><br/></span>
-            <span>Другие источники</span> </p>
+    by <br/> line-breaks. See _split_merged_label_tag() for DOM shapes handled.
 
-    Returns (label_name, pre_content_tag) when detected, otherwise None.
-    - label_name   : clean text of the section label ("Другие источники")
-    - pre_content_tag : a copy of the original tag with the label part removed,
-                        ready to be added as content to the current section.
+    Returns (label_name, pre_content_tag, post_content_tag) when detected,
+    otherwise None.
     """
     other_src_kw = [
         'другие источники', 'другие каналы', 'другой источник', 'другие боты',
@@ -1074,12 +1173,6 @@ def _get_trailing_email_label(tag):
         'др источники', 'для др. источников', 'другой ист', 'другие ист',
         'письмо в юнисендер', 'письмо для юнисендера', 'письмо юнисендер',
     ]
-
-    # Only consider tags that contain <br/> tags
-    if not tag.find('br'):
-        return None
-
-    children = list(tag.children)
 
     def _match_label(candidate_children):
         """Return the label text if candidate_children's text starts with a
@@ -1096,68 +1189,18 @@ def _get_trailing_email_label(tag):
             return None
         return text
 
-    # Candidate 1: split right after the LAST direct child that contains a <br/>
-    # anywhere in it (the common shape: "...content...<br/><br/>Label", label in
-    # its own following span with no <br/> of its own).
-    last_br_child_idx = -1
-    for i, child in enumerate(children):
-        if hasattr(child, 'find') and child.find('br'):
-            last_br_child_idx = i
-
-    split_idx = None
-    post_text = None
-    if last_br_child_idx >= 0:
-        post_text = _match_label(children[last_br_child_idx + 1:])
-        if post_text is not None:
-            split_idx = last_br_child_idx + 1
-
-    # Candidate 2 (fallback): the label span itself carries its own trailing
-    # <br/> artifact (a common Google Docs export quirk), so it matched the
-    # <br/> scan above and became the "separator" itself, leaving nothing after
-    # it to treat as the label. Retry with the very last child in isolation.
-    if split_idx is None and len(children) >= 2:
-        post_text = _match_label(children[-1:])
-        if post_text is not None:
-            split_idx = len(children) - 1
-
-    if split_idx is None:
-        return None
-
-    # Require non-empty content BEFORE the label
-    pre_text = ''.join(
-        c.get_text() if hasattr(c, 'get_text') else str(c)
-        for c in children[:split_idx]
-    ).strip()
-    if not pre_text:
-        return None
-
-    # Build a copy of the tag with only the pre-label content, cut at the same
-    # child index (re-parsing the same serialized string yields identical
-    # child structure/order).
-    pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
-    if pre_tag:
-        pre_children_copy = list(pre_tag.children)
-        for child in pre_children_copy[split_idx:]:
-            child.extract()
-
-    return (post_text.strip(), pre_tag)
+    return _split_merged_label_tag(tag, _match_label)
 
 
 def _get_trailing_tg_label(tag):
     """
     Detects a merged Google Docs paragraph where body content and a TG section
     label (e.g. "Бот (общий)") share a single <p> tag, separated by <br/> tags.
-    Example DOM shape:
-        <p> <span>...РЕКЛАМА...</span> <span><br/></span>
-            <span style="font-weight:700">Бот (общий)</span> </p>
+    See _split_merged_label_tag() for DOM shapes handled.
 
-    Returns (label_name, pre_content_tag) when detected, otherwise None.
+    Returns (label_name, pre_content_tag, post_content_tag) when detected,
+    otherwise None.
     """
-    if not tag.find('br'):
-        return None
-
-    children = list(tag.children)
-
     def _match_label(candidate_children):
         """Return the label text if candidate_children's text matches the TG
         bot-label pattern and passes the length guard, else None."""
@@ -1171,51 +1214,7 @@ def _get_trailing_tg_label(tag):
             return None
         return text
 
-    # Candidate 1: split right after the LAST direct child that contains a <br/>
-    # anywhere in it (the common shape: "...content...<br/>Label", label in its
-    # own following span with no <br/> of its own).
-    last_br_child_idx = -1
-    for i, child in enumerate(children):
-        if hasattr(child, 'find') and child.find('br'):
-            last_br_child_idx = i
-
-    split_idx = None
-    post_text = None
-    if last_br_child_idx >= 0:
-        post_text = _match_label(children[last_br_child_idx + 1:])
-        if post_text is not None:
-            split_idx = last_br_child_idx + 1
-
-    # Candidate 2 (fallback): the label span itself carries its own trailing
-    # <br/> artifact (a common Google Docs export quirk, e.g. "БОТ (общий)<br/>"
-    # as the very last span), so it matched the <br/> scan above and became the
-    # "separator" itself, leaving nothing after it to treat as the label. Retry
-    # with the very last child in isolation.
-    if split_idx is None and len(children) >= 2:
-        post_text = _match_label(children[-1:])
-        if post_text is not None:
-            split_idx = len(children) - 1
-
-    if split_idx is None:
-        return None
-
-    pre_text = ''.join(
-        c.get_text() if hasattr(c, 'get_text') else str(c)
-        for c in children[:split_idx]
-    ).strip()
-    if not pre_text:
-        return None
-
-    # Build a copy of the tag with only the pre-label content, cut at the same
-    # child index (re-parsing the same serialized string yields identical
-    # child structure/order).
-    pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
-    if pre_tag:
-        pre_children_copy = list(pre_tag.children)
-        for child in pre_children_copy[split_idx:]:
-            child.extract()
-
-    return (post_text.strip(), pre_tag)
+    return _split_merged_label_tag(tag, _match_label)
 
 
 def _extract_residual_media(tag):
@@ -1783,7 +1782,7 @@ def parse_doc_html(html_content, ai_hints=None):
         if tag.find('br') and tag.name in ('p', 'li', 'h1', 'h2', 'h3', 'h4'):
             split_result = _get_trailing_email_label(tag)
             if split_result:
-                label_name, pre_tag = split_result
+                label_name, pre_tag, post_tag = split_result
                 if pre_tag and get_text_content(pre_tag).strip():
                     if current_section == 'tg_section' and tg_subsections:
                         tg_subsections[-1]['blocks'].append(pre_tag)
@@ -1793,11 +1792,13 @@ def parse_doc_html(html_content, ai_hints=None):
                         sections['other'].append(pre_tag)
                 email_subsections.append({'name': label_name[:50], 'blocks': []})
                 current_section = 'email_section'
+                if post_tag:
+                    email_subsections[-1]['blocks'].append(post_tag)
                 return
 
             split_result_tg = _get_trailing_tg_label(tag)
             if split_result_tg:
-                label_name, pre_tag = split_result_tg
+                label_name, pre_tag, post_tag = split_result_tg
                 if pre_tag and get_text_content(pre_tag).strip():
                     if current_section == 'tg_section' and tg_subsections:
                         tg_subsections[-1]['blocks'].append(pre_tag)
@@ -1807,6 +1808,8 @@ def parse_doc_html(html_content, ai_hints=None):
                         sections['other'].append(pre_tag)
                 tg_subsections.append({'name': label_name[:50], 'blocks': []})
                 current_section = 'tg_section'
+                if post_tag:
+                    tg_subsections[-1]['blocks'].append(post_tag)
                 return
 
         section_type = is_section_header(tag, ai_hints=ai_hints)
