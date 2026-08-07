@@ -967,6 +967,16 @@ def is_section_header(tag, ai_hints=None):
     if any(text.startswith(kw) for kw in OTHER_SRC_LABEL_KW):
         return 'email_section'
 
+    # Merged "N. Контент письма" numbered structural heading (e.g. "4. Контент
+    # письма<br><br>Тема: X<br><br>") — some documents use THIS heading alone to
+    # open the email section, with no further "ПОЧТА (1 клик)" label anywhere in
+    # the doc. Already recognized post-guard in email_kw below ('контент письма',
+    # '3. контент'), but that never gets a chance to run once Тема:/Прехедер:
+    # glued onto the same paragraph push text past 120 chars — same class of bug
+    # as the checks above. Must run BEFORE the length guard for the same reason.
+    if re.match(r'^\d+[.)]\s*контент\s+письма|^контент\s+письма', text):
+        return 'email_section'
+
     # Merged "Тема:"/"Прехедер:" header immediately followed by more real content in the
     # same paragraph, e.g. "Тема: X!<br><br>Разберем по шагам..." — same class of bug as
     # the checks above, found the same day: this used to sit only in the post-guard block
@@ -1055,6 +1065,60 @@ def is_section_header(tag, ai_hints=None):
             return 'tg_section'
 
     return None
+
+
+def _unwrap_br_lines(tag_copy):
+    """
+    Google Docs sometimes glues several logical lines into ONE child span,
+    separated only by <br> tags nested directly inside that span, e.g.:
+        <span class="c1"><br>4. Контент письма<br><br>Тема: X<br><br></span>
+    instead of splitting them into separate sibling spans each with its own
+    trailing <br> (the shape meta-line detection below already expects — see
+    _consume_leading_meta's docstring and the email_section merged-header
+    handling in process_block()). Both of those already correctly treat "a
+    child that contains a <br>" as one self-contained line/boundary — they
+    just never look INSIDE a child for multiple such lines glued together.
+
+    Mutates tag_copy in place: for any direct child whose own direct contents
+    are a flat mix of text and <br> only (no deeper nested tags — left alone,
+    conservatively, since reconstructing those per-line is not needed for any
+    case seen so far), replaces it with one sibling clone per <br>-delimited
+    line, each carrying the same tag name/attributes plus its own trailing
+    <br> — so the existing per-child boundary checks keep working unchanged.
+    A child that turns out to hold only one real line (the common, already-
+    working shape) is left untouched.
+    """
+    for child in list(tag_copy.children):
+        if not hasattr(child, 'contents'):
+            continue
+        if not any(getattr(n, 'name', None) == 'br' for n in child.contents):
+            continue
+        if any(hasattr(n, 'contents') and getattr(n, 'name', None) != 'br'
+               for n in child.contents):
+            continue  # deeper nested tag inside — leave this child alone
+        lines, current = [], []
+        for node in child.contents:
+            if getattr(node, 'name', None) == 'br':
+                lines.append(current)
+                current = []
+            else:
+                current.append(str(node))
+        lines.append(current)
+        new_children = []
+        for line in lines:
+            line_text = ''.join(line)
+            if not line_text.strip():
+                continue
+            clone = BeautifulSoup(f'<{child.name}></{child.name}>', 'lxml').find(child.name)
+            for attr, val in child.attrs.items():
+                clone[attr] = val
+            clone.append(NavigableString(line_text))
+            clone.append(BeautifulSoup('<br>', 'lxml').br)
+            new_children.append(clone)
+        if len(new_children) > 1:
+            for nc in new_children:
+                child.insert_before(nc)
+            child.extract()
 
 
 def _split_merged_label_tag(tag, _match_label):
@@ -1723,6 +1787,7 @@ def parse_doc_html(html_content, ai_hints=None):
             lines and keeps the real sentence instead of discarding the whole tag.
             """
             nonlocal subject, preview, sender
+            _unwrap_br_lines(tag_copy)
             children = list(tag_copy.children)
             groups = []  # list of (children_in_group, joined_raw_text)
             group_children, group_text_parts = [], []
@@ -1890,6 +1955,7 @@ def parse_doc_html(html_content, ai_hints=None):
             if tag.find('br'):
                 tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
                 if tag_copy:
+                    _unwrap_br_lines(tag_copy)
                     to_remove = []
                     for child in list(tag_copy.children):
                         child_text = (child.get_text(' ', strip=True) if hasattr(child, 'get_text')
