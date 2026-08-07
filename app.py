@@ -387,8 +387,6 @@ a { text-decoration:none; }
   .es-col-2, .es-col-3 { display:block !important; width:100% !important; padding:5px 0 !important; }
   .es-col-gap { display:none !important; }
   .es-col-img { max-width:200px !important; width:auto !important; display:block; margin:0 auto; }
-  .es-fs-18 { font-size:16px !important; line-height:24px !important; }
-  .es-fs-16 { font-size:15px !important; line-height:22px !important; }
 }
 </style>
 </head>
@@ -461,27 +459,42 @@ EMAIL_WRAPPER_END = '''
 # Email block helpers
 # ---------------------------------------------------------------------------
 
-def block_white(paragraphs_html):
+def _style_block_image_html(image_url):
+    """Optional image row shared by the plain-text style blocks (white/grey/
+    dotted/blue) — same markup as block_image_with_text's image, so a block
+    keeps its picture when its style is switched between these types."""
+    if not image_url:
+        return ''
+    return (
+        '<div style="text-align:center;font-size:0px;padding-bottom:10px">'
+        f'<img src="{image_url}" alt="" style="display:inline-block;border:0;max-width:100%;border-radius:10px">'
+        '</div>\n'
+    )
+
+def block_white(paragraphs_html, image_url=''):
     return (
         '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 20px;margin:0;background-color:#ffffff">\n'
+        + _style_block_image_html(image_url)
         + paragraphs_html
         + '\n</td></tr>'
     )
 
-def block_grey(paragraphs_html):
+def block_grey(paragraphs_html, image_url=''):
     return (
         '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
         '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #f0f1f3;border-radius:20px" role="presentation">\n'
         '<tr><td align="left" bgcolor="#f0f1f3" style="padding:10px 15px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#333333">\n'
+        + _style_block_image_html(image_url)
         + paragraphs_html
         + '\n</td></tr>\n</table></td></tr>'
     )
 
-def block_dotted(paragraphs_html):
+def block_dotted(paragraphs_html, image_url=''):
     return (
         '<tr><td style="padding:10px;margin:0;background-color:#ffffff">\n'
         '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:3px dashed #1544ed;border-radius:13px" role="presentation">\n'
         '<tr><td align="left" style="padding:15px 10px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#333333">\n'
+        + _style_block_image_html(image_url)
         + paragraphs_html
         + '\n</td></tr>\n</table></td></tr>'
     )
@@ -515,12 +528,13 @@ def block_image_with_text(image_url, paragraphs_html):
         + '\n</td></tr>'
     )
 
-def block_blue_text(paragraphs_html):
+def block_blue_text(paragraphs_html, image_url=''):
     """Blue block without a CTA button."""
     return (
         '<tr><td style="padding:5px 10px 10px;margin:0;background-color:#ffffff">\n'
         '<table cellspacing="0" cellpadding="0" width="100%" style="border-collapse:separate;border-spacing:0;border:10px solid #1445ea;border-radius:20px" role="presentation">\n'
         '<tr><td align="left" bgcolor="#1445ea" style="padding:15px 10px;margin:0;font-family:roboto,\'helvetica neue\',helvetica,arial,sans-serif;font-size:18px;line-height:27px;color:#ffffff">\n'
+        + _style_block_image_html(image_url)
         + paragraphs_html
         + '\n</td></tr>\n</table></td></tr>'
     )
@@ -3171,19 +3185,32 @@ def _split_paras_at(html_str, position):
     return pre, post
 
 def _add_mobile_font_classes(html):
-    """Tag <p style="...font-size:18px..."> / font-size:16px paragraphs with a
-    class (es-fs-18 / es-fs-16) so the @media block in EMAIL_WRAPPER_START can
-    shrink body/CTA text and 2-col text on mobile via a single CSS rule,
+    """Shrink <p style="...font-size:18px..."> / font-size:16px paragraphs
+    directly in their inline style (18->16px/27->24 line-height, 16->15/24->22),
     instead of threading a mobile-specific font_size through every paragraph
     generator (tag_to_email_p, the CTA renderer, the list-item builders,
-    _cell_para_html, ...). Headings, buttons, and footer/legal text (built
-    outside content_table) are untouched since they don't match 18/16."""
+    _cell_para_html, ...).
+
+    This used to add an es-fs-18/es-fs-16 class and shrink via an @media rule
+    in EMAIL_WRAPPER_START's <style> block, applying only below 600px so
+    desktop stayed at 18/16. That relied on the <style> block surviving to
+    the inbox — Gmail (and other bulk-mail filters) strips <head>/<style>
+    from marketing sends often enough that the mobile-only rule never fired
+    in practice (same root cause documented for 2-col blocks: GetCourse/ESPs
+    don't deliver the pasted code as a real standalone <html><head> document).
+    Writing the smaller size straight into the inline style attribute makes
+    it apply everywhere unconditionally — no <head>/@media dependency to be
+    stripped — at the cost of desktop also getting the smaller size."""
     def _inject(m):
         style = m.group(1)
         fs_match = re.search(r'font-size:(\d+)px', style)
         if not fs_match or fs_match.group(1) not in ('18', '16'):
             return m.group(0)
-        return f'<p class="es-fs-{fs_match.group(1)}" style="{style}"'
+        shrink = {'18': ('18', '16', '27', '24'), '16': ('16', '15', '24', '22')}
+        fs_from, fs_to, lh_from, lh_to = shrink[fs_match.group(1)]
+        style = style.replace(f'font-size:{fs_from}px', f'font-size:{fs_to}px')
+        style = re.sub(rf'line-height:{lh_from}px\b', f'line-height:{lh_to}px', style)
+        return f'<p style="{style}"'
     return re.sub(r'<p style="([^"]*)"', _inject, html)
 
 def generate_email_html(email_section_html, channel_key, campaign, date, images, subject='', segment=''):
@@ -4679,11 +4706,11 @@ def api_assemble_email():
                 + '</table></td></tr>'
             )
         elif btype == 'block_grey':
-            row = block_grey(ph)
+            row = block_grey(ph, block.get('image_url', ''))
         elif btype == 'block_dotted':
-            row = block_dotted(ph)
+            row = block_dotted(ph, block.get('image_url', ''))
         elif btype == 'block_blue_text':
-            row = block_blue_text(ph)
+            row = block_blue_text(ph, block.get('image_url', ''))
         elif btype == 'block_button':
             row = block_button(btn_url_utm, btn_text, ph)
         elif btype == 'block_spacer':
@@ -4703,7 +4730,7 @@ def api_assemble_email():
         elif btype == 'block_3col_text':
             row = block_3col_text(ph, block.get('col2_html', ''), block.get('col3_html', ''))
         else:
-            row = block_white(ph)
+            row = block_white(ph, block.get('image_url', ''))
         content_rows.append(row)
 
     content_table = (
