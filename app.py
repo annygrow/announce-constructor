@@ -1067,26 +1067,33 @@ def is_section_header(tag, ai_hints=None):
     return None
 
 
-def _unwrap_br_lines(tag_copy):
+def normalize_br_lines(tag_copy):
     """
-    Google Docs sometimes glues several logical lines into ONE child span,
-    separated only by <br> tags nested directly inside that span, e.g.:
+    "Дублёр" primitive #1: normalizes a tag so its direct children satisfy the
+    invariant every section-boundary/meta-extraction function below assumes —
+    "one <br>-delimited logical line = one direct child". Google Docs breaks
+    that invariant in two ways found across many bugs (#18/#27/#34/#35...):
+    it glues several logical lines into ONE child span separated only by
+    <br> tags nested directly inside that span, e.g.:
         <span class="c1"><br>4. Контент письма<br><br>Тема: X<br><br></span>
     instead of splitting them into separate sibling spans each with its own
-    trailing <br> (the shape meta-line detection below already expects — see
-    _consume_leading_meta's docstring and the email_section merged-header
-    handling in process_block()). Both of those already correctly treat "a
-    child that contains a <br>" as one self-contained line/boundary — they
-    just never look INSIDE a child for multiple such lines glued together.
+    trailing <br>. Rather than patching every consumer (is_section_header's
+    merged-header handling, _consume_leading_meta, _split_merged_label_tag)
+    to walk <br> tokens at arbitrary nesting depth individually — which is
+    how bugs #18, #27, #28, #34, #35 each got fixed separately, duplicating
+    the same fragile DOM-walk — this normalizes the shape ONCE, up front, so
+    all of those can keep their existing (already-correct-for-the-normalized-
+    shape) direct-child logic unchanged. This is the shared "Дублёр" building
+    block: call it before any line-oriented scan of a merged <p>.
 
     Mutates tag_copy in place: for any direct child whose own direct contents
     are a flat mix of text and <br> only (no deeper nested tags — left alone,
-    conservatively, since reconstructing those per-line is not needed for any
-    case seen so far), replaces it with one sibling clone per <br>-delimited
-    line, each carrying the same tag name/attributes plus its own trailing
-    <br> — so the existing per-child boundary checks keep working unchanged.
-    A child that turns out to hold only one real line (the common, already-
-    working shape) is left untouched.
+    conservatively, since reconstructing those per-line has not been needed
+    for any case seen so far), replaces it with one sibling clone per
+    <br>-delimited line, each carrying the same tag name/attributes plus its
+    own trailing <br>. A child that turns out to hold only one real line (the
+    common, already-working shape) is left untouched — this makes the
+    function a safe no-op on already-well-formed documents.
     """
     for child in list(tag_copy.children):
         if not hasattr(child, 'contents'):
@@ -1146,7 +1153,17 @@ def _split_merged_label_tag(tag, _match_label):
     if not tag.find('br'):
         return None
 
-    children = list(tag.children)
+    # Work on a private, normalized copy — never the live document tree — so a
+    # child that itself glues multiple <br>-delimited lines together (e.g. label
+    # text and adjoining content sharing one span) is split into proper one-
+    # line-per-child form first. The three Candidates below already handle the
+    # "one line = one child" shape correctly; this just guarantees that shape
+    # actually holds before they run. See normalize_br_lines() docstring.
+    work = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+    if work is None:
+        return None
+    normalize_br_lines(work)
+    children = list(work.children)
 
     pre_end = None    # index where content-before-label ends (label starts here)
     label_end = None  # index where the label itself ends (post content starts here)
@@ -1200,10 +1217,12 @@ def _split_merged_label_tag(tag, _match_label):
         return None
 
     # Build a copy of the tag with only the pre-label content, cut at the same
-    # child index (re-parsing the same serialized string yields identical
-    # child structure/order).
+    # child index (re-parsing the same serialized string and re-normalizing it
+    # the same deterministic way yields identical child structure/order to
+    # `work` above, so pre_end/label_end apply unchanged).
     pre_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
     if pre_tag:
+        normalize_br_lines(pre_tag)
         pre_children_copy = list(pre_tag.children)
         for child in pre_children_copy[pre_end:]:
             child.extract()
@@ -1215,6 +1234,7 @@ def _split_merged_label_tag(tag, _match_label):
     if label_end < len(children):
         post_candidate = BeautifulSoup(str(tag), 'lxml').find(tag.name)
         if post_candidate:
+            normalize_br_lines(post_candidate)
             post_children_copy = list(post_candidate.children)
             for child in post_children_copy[:label_end]:
                 child.extract()
@@ -1787,14 +1807,19 @@ def parse_doc_html(html_content, ai_hints=None):
             lines and keeps the real sentence instead of discarding the whole tag.
             """
             nonlocal subject, preview, sender
-            _unwrap_br_lines(tag_copy)
+            normalize_br_lines(tag_copy)
             children = list(tag_copy.children)
             groups = []  # list of (children_in_group, joined_raw_text)
             group_children, group_text_parts = [], []
             for child in children:
                 group_children.append(child)
                 group_text_parts.append(child.get_text('', strip=False) if hasattr(child, 'get_text') else str(child))
-                if hasattr(child, 'find') and child.find('br') is not None:
+                # A <br> is a boundary whether it's nested inside this child (the
+                # common case) or IS this child directly — child.find('br') only
+                # catches the former (it searches descendants), so a bare <br>
+                # sitting as its own direct child (e.g. a lone spacer line) used
+                # to accumulate into the group instead of closing it.
+                if hasattr(child, 'find') and (child.find('br') is not None or getattr(child, 'name', None) == 'br'):
                     groups.append((group_children, ''.join(group_text_parts)))
                     group_children, group_text_parts = [], []
             if group_children:
@@ -1955,7 +1980,7 @@ def parse_doc_html(html_content, ai_hints=None):
             if tag.find('br'):
                 tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
                 if tag_copy:
-                    _unwrap_br_lines(tag_copy)
+                    normalize_br_lines(tag_copy)
                     to_remove = []
                     for child in list(tag_copy.children):
                         child_text = (child.get_text(' ', strip=True) if hasattr(child, 'get_text')

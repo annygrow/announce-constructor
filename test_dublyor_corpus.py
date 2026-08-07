@@ -151,6 +151,27 @@ parse_case('bug18', '"Бот (общий)" trailing label + glued new-section co
     '<b>БОТ (общий)</b><br/><br/>Новый вариант текста для воронок.</p>',
     _check_bug18)
 
+# --- Дублёр generalization: same bug, but even MORE glued — ad text, label
+# AND new content all inside ONE span (never observed in the wild yet, but
+# normalize_br_lines() should handle it as a natural consequence of being a
+# general <br>-line splitter, not a shape-specific patch).
+def _check_bug18_generalized(parsed):
+    variants = parsed.get('tg_variants') or []
+    if len(variants) < 2:
+        return (False, f'expected 2 tg_variants (ГК + общий), got {len(variants)}')
+    v2_html = variants[1].get('html', '')
+    leaked_label = 'бот (общий)' in v2_html.lower()
+    has_new_content = 'полностью слитый вариант' in v2_html.lower()
+    return (not leaked_label and has_new_content,
+            f'leaked_label={leaked_label} has_new_content={has_new_content}')
+
+parse_case('bug18b', 'Дублёр: label glued into ad-text via internal <br> (untested shape)',
+    '<p>БОТ (1 клик)</p>'
+    '<p>Основной текст ГК-бота.</p>'
+    '<p><span>ИНН 9715401631<br/><br/><br/>БОТ (общий)<br/><br/>'
+    'Полностью слитый вариант текста для воронок.</span></p>',
+    _check_bug18_generalized)
+
 # --- #19: content before "РЕКЛАМА" in same <p> must survive (not dropped whole) ---
 def _check_bug19(parsed):
     tg = parsed.get('tg_html') or ''
