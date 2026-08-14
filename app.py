@@ -3723,6 +3723,13 @@ def clean_tag_for_tg(tag, _in_bold=False, _wrapped=False):
                 parts.append(f'<code>{inner}</code>')
             elif name == 'a' and child.get('href'):
                 inner = clean_tag_for_tg(child, _in_bold=_in_bold, _wrapped=_wrapped)
+                # Google Docs artifact: trailing <br> inside the link (-> '\n' here)
+                # pushes the closing </a> onto its own line once the caller splits
+                # this string on '\n'; that line has no visible text after tags are
+                # stripped, so it gets silently dropped and the <a> is left unclosed
+                # ('a' isn't in the b/i/u/s defensive re-balance list downstream).
+                # Trim so </a> always sits on the same line as the visible content.
+                inner = inner.strip('\n')
                 href = decode_google_redirect(child['href'])
                 parts.append(f'<a href="{href}">{inner}</a>')
             elif name == 'sup':
