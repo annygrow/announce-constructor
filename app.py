@@ -394,7 +394,7 @@ a { text-decoration:none; }
 <tr><td valign="top" style="padding:0;margin:0">'''
 
 EMAIL_HEADER = '''
-<table cellpadding="0" cellspacing="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:430px;background-color:#f6f6f6">
+<table cellpadding="0" cellspacing="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:{min_width}px;background-color:#f6f6f6">
 <tr><td align="left" bgcolor="#f6f6f6" style="padding:0 20px;margin:0;background-color:#f6f6f6">
 <table cellpadding="0" cellspacing="0" width="100%" role="none" style="border-collapse:collapse;border-spacing:0">
 <tr><td align="center" style="padding:10px;margin:0;font-size:0px">
@@ -407,7 +407,7 @@ EMAIL_HEADER = '''
 '''
 
 EMAIL_FOOTER = '''
-<table class="es-footer-body" cellspacing="0" cellpadding="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#333333;width:100%;max-width:600px;min-width:430px">
+<table class="es-footer-body" cellspacing="0" cellpadding="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#333333;width:100%;max-width:600px;min-width:{min_width}px">
 <tr><td align="left" style="padding:20px 20px 10px;margin:0">
 <table cellpadding="0" cellspacing="0" class="es-left" align="left" role="none" style="border-collapse:collapse;border-spacing:0;float:left;width:270px">
 <tr><td align="left" style="padding:0;margin:0;width:270px">
@@ -440,7 +440,7 @@ EMAIL_FOOTER = '''
 '''
 
 EMAIL_AD_DISCLAIMER = '''
-<table cellspacing="0" cellpadding="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#ffffff;width:100%;max-width:600px;min-width:430px">
+<table cellspacing="0" cellpadding="0" align="center" width="100%" role="none" style="border-collapse:collapse;border-spacing:0;background-color:#ffffff;width:100%;max-width:600px;min-width:{min_width}px">
 <tr><td align="center" style="padding:16px 20px 16px;margin:0">
 <p style="margin:0 0 4px 0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:16px;color:#999999;font-size:11px">РЕКЛАМА ООО &quot;ЗЕРОКОДЕР&quot;</p>
 <p style="margin:0;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;line-height:16px;color:#999999;font-size:11px">ИНН 9715401631</p>
@@ -640,7 +640,7 @@ def block_2col_img_text(image_url, text_html):
     img_style = _col_img_style(image_url)
     img_w = _col_img_width_attr(image_url)
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff;font-size:0">\n'
+        '<tr><td align="center" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff;font-size:0">\n'
         f'<div style="display:inline-block;vertical-align:top;width:{_COL_IMG_WIDTH + 12}px;box-sizing:border-box;padding-right:12px;font-size:16px">'
         f'<img src="{image_url}" alt=""{img_w} class="es-col-img" style="{img_style}">'
         '</div>'
@@ -657,7 +657,7 @@ def block_2col_text_img(text_html, image_url):
     img_style = _col_img_style(image_url)
     img_w = _col_img_width_attr(image_url)
     return (
-        '<tr><td align="left" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff;font-size:0">\n'
+        '<tr><td align="center" bgcolor="#ffffff" style="padding:10px 12px;background-color:#ffffff;font-size:0">\n'
         f'<div style="display:inline-block;vertical-align:top;width:{_COL_TEXT_WIDTH}px;max-width:100%;box-sizing:border-box;{col_style}">'
         + text_html
         + '</div>'
@@ -666,6 +666,22 @@ def block_2col_text_img(text_html, image_url):
         '</div>'
         '\n</td></tr>'
     )
+
+_TWO_COL_IMG_BLOCK_TYPES = {'block_2col_img_text', 'block_2col_text_img'}
+
+def _content_min_width(block_types):
+    """Width floor (px, as str) for content_table/header/footer/disclaimer.
+
+    block_2col_img_text/block_2col_text_img lay out as two fixed-width
+    inline-block <div> columns (see block_2col_img_text docstring) that need
+    ~584px to sit side by side; below that the second one wraps onto its own
+    line like a long word. 430px (the floor tuned for plain text — see
+    project_mobile_layout_fix) is too narrow for that, so any email containing
+    one of these blocks gets the full 600px design width instead: the table
+    never shrinks, so the phone soft-zooms the whole email and the columns
+    stay side by side, matching Unisender's fixed-width behavior.
+    """
+    return '600' if any(t in _TWO_COL_IMG_BLOCK_TYPES for t in block_types) else '430'
 
 def block_2col_text_text(left_html, right_html):
     """Two equal text columns."""
@@ -3622,23 +3638,24 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                             'paragraphs_html': '', 'btn_text': '', 'btn_url_utm': '',
                             'preview_text': 'Картинка'})
 
+    content_min_width = _content_min_width(m.get('type', '') for m in blocks_data)
     content_table = (
         '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" width="100%" '
-        'role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:430px;background-color:#ffffff">\n'
+        f'role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:{content_min_width}px;background-color:#ffffff">\n'
         + '\n'.join(content_rows)
         + '\n</table>'
     )
     content_table = _add_mobile_font_classes(content_table)
 
-    logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
+    logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL).replace('{min_width}', content_min_width)
     subject_safe = subject or 'Рассылка ZeroCoder'
 
-    ad_block = EMAIL_AD_DISCLAIMER if channel_key == 'email_unisender' else ''
+    ad_block = EMAIL_AD_DISCLAIMER.replace('{min_width}', content_min_width) if channel_key == 'email_unisender' else ''
     html = (
         EMAIL_WRAPPER_START.replace('{subject}', subject_safe)
         + logo_header
         + content_table
-        + EMAIL_FOOTER
+        + EMAIL_FOOTER.replace('{min_width}', content_min_width)
         + ad_block
         + EMAIL_WRAPPER_END
     )
@@ -4753,21 +4770,22 @@ def api_assemble_email():
             row = block_white(ph, block.get('image_url', ''))
         content_rows.append(row)
 
+    content_min_width = _content_min_width(b.get('type', '') for b in blocks)
     content_table = (
         '<table cellpadding="0" cellspacing="0" align="center" class="es-content-body" width="100%" '
-        'role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:430px;background-color:#ffffff">\n'
+        f'role="none" style="border-collapse:collapse;border-spacing:0;width:100%;max-width:600px;min-width:{content_min_width}px;background-color:#ffffff">\n'
         + '\n'.join(content_rows)
         + '\n</table>'
     )
     content_table = _add_mobile_font_classes(content_table)
-    logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL)
+    logo_header = EMAIL_HEADER.replace('{logo_url}', LOGO_URL).replace('{min_width}', content_min_width)
     subject_safe = subject or 'Рассылка ZeroCoder'
-    ad_block = EMAIL_AD_DISCLAIMER if channel_key == 'email_unisender' else ''
+    ad_block = EMAIL_AD_DISCLAIMER.replace('{min_width}', content_min_width) if channel_key == 'email_unisender' else ''
     html = (
         EMAIL_WRAPPER_START.replace('{subject}', subject_safe)
         + logo_header
         + content_table
-        + EMAIL_FOOTER
+        + EMAIL_FOOTER.replace('{min_width}', content_min_width)
         + ad_block
         + EMAIL_WRAPPER_END
     )
