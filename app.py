@@ -309,6 +309,14 @@ def parse_with_ai(raw_html):
     client = OpenAI(api_key=api_key, base_url=base_url)
 
     soup = BeautifulSoup(raw_html, 'lxml')
+    # Strip Google Docs comment/footnote containers (the divs holding "[d]" +
+    # the real URL/{offer_url_...} behind each link) before building the AI's
+    # input text. Without this, that raw "[d]{offer_url_...}" metadata sits in
+    # the body as trailing <p> tags and the model sometimes copies it verbatim
+    # into tg_main/tg_voronki — which then also makes it look like it "contains
+    # {offer_url_}", i.e. email-only content, and gets discarded (see
+    # _looks_like_email below), silently falling back to unrelated email text.
+    extract_footnotes(soup)
     # Build plain text paragraph-by-paragraph using empty separator within each paragraph
     # so words split across adjacent spans (Google Docs artifact) stay intact.
     # '\n'.join keeps document structure visible to the AI.
@@ -939,6 +947,19 @@ def is_section_header(tag, ai_hints=None):
     if re.match(r'^бот\s*\(', text) and len(text) <= 40:
         return 'tg_section'
 
+    # "<label> (бот)" — e.g. "в 1 клик (бот)", "общий (бот)": the trailing "(бот)"
+    # marks this as a TG section header even though it starts with a generic word
+    # ("в 1 клик") that the meta_label_kw skip-list below also matches on its own
+    # (for the standalone, non-TG "в 1 клик" sub-variant label). Must run before
+    # that skip-list or "в 1 клик (бот)" gets silently discarded instead of opening
+    # a TG section — the doc never gets a tg_html at all.
+    # No length cap and not end-anchored: Google Docs commonly glues the header to
+    # the section's first content line in the same <p> (same class as the merged-
+    # header cases above), e.g. "в 1 клик (бот)Сколько выходит на фрилансе...", so
+    # the "(бот)" marker must be found as an early prefix, not the whole string.
+    if re.match(r'^.{0,40}?\(\s*бот\s*\)', text):
+        return 'tg_section'
+
     # AI hints are intentionally NOT used here. ai_hints is accepted as a parameter
     # for backwards-compatibility but ignored: stochastic AI responses caused intermittent
     # wrong section splits. All section detection is deterministic via keywords below.
@@ -1323,7 +1344,10 @@ def _get_trailing_tg_label(tag):
             c.get_text() if hasattr(c, 'get_text') else str(c)
             for c in candidate_children
         ).strip()
-        if not re.match(r'^бот\s*\(', text.lower()):
+        text_lower = text.lower()
+        # "Бот (общий)" style, or "<label> (бот)" style (e.g. "в 1 клик (бот)",
+        # "общий (бот)") — see matching case in is_section_header().
+        if not (re.match(r'^бот\s*\(', text_lower) or re.search(r'\(\s*бот\s*\)', text_lower)):
             return None
         if len(text) > 60:
             return None
@@ -4210,6 +4234,17 @@ def generate_tg_html(tg_section_html, channel_key, campaign, date, segment=''):
             nc = inner_seg.count(f'</{t}>')
             if no > nc:
                 inner_seg += f'</{t}>' * (no - nc)
+        # Balance <a href="...">...</a> too — a Google Docs <br> or paragraph
+        # split landing inside a link can leave an <a> unclosed in one block and
+        # an orphaned </a> in another (previously not caught here since 'a' carries
+        # an href attribute unlike the fixed-name tags above): close a dangling
+        # open tag, or drop a leading orphaned close that has no matching open.
+        no_a = len(re.findall(r'<a\s+href="[^"]*"[^>]*>', inner_seg))
+        nc_a = inner_seg.count('</a>')
+        if no_a > nc_a:
+            inner_seg += '</a>' * (no_a - nc_a)
+        elif nc_a > no_a:
+            inner_seg = re.sub('</a>', '', inner_seg, count=nc_a - no_a)
         return f'<p>{inner_seg}</p>'
     output = re.sub(r'<p>.*?</p>', _balance_p, output, flags=re.DOTALL)
     # Legal notice
@@ -4307,6 +4342,13 @@ def generate_tg_bots(tg_section_html, channel_key, campaign, date, segment=''):
                 _ln += f'</{_t}>' * (_no - _nc)
             elif _nc > _no:
                 _ln = f'<{_t}>' * (_nc - _no) + _ln
+        # Balance <a href="...">...</a> too — see matching comment in generate_tg_html.
+        _no_a = len(re.findall(r'<a\s+href="[^"]*"[^>]*>', _ln))
+        _nc_a = _ln.count('</a>')
+        if _no_a > _nc_a:
+            _ln += '</a>' * (_no_a - _nc_a)
+        elif _nc_a > _no_a:
+            _ln = re.sub('</a>', '', _ln, count=_nc_a - _no_a)
         fixed_lines.append(_ln)
     output = '\n'.join(fixed_lines)
     output += '\n\nРЕКЛАМА ООО "ЗЕРОКОДЕР"\nИНН 9715401631'
@@ -4482,14 +4524,17 @@ def api_parse():
         def _looks_like_email(text):
             """True if the text looks like full email content rather than a TG message.
             TG messages can legitimately be long (3000+ chars) so length alone is not
-            a reliable signal. Use only markers that are exclusive to email_gc content."""
+            a reliable signal. Use only markers that are exclusive to email_gc content.
+            {first_name} is NOT such a marker — TG bot channels use it too (see
+            CHANNELS[...]['rename_first_name'] in config.py, which renames it to
+            {firstName} downstream); treating it as email-only wrongly discarded
+            legitimate tg_main/tg_voronki content that opens with a personalized
+            greeting, silently falling back to (much longer, unrelated) email content
+            for every TG channel."""
             if not text:
                 return False
             # GC offer URL variable only appears in email_gc, never in TG messages
             if '{offer_url_' in text:
-                return True
-            # GC personalization variable only appears in email_gc
-            if '{first_name}' in text:
                 return True
             return False
 
