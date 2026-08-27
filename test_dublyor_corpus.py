@@ -14,7 +14,7 @@ corpus and match (or improve on) every case before any cutover.
 
 Run: python test_dublyor_corpus.py
 """
-import os, sys, io
+import os, sys, io, re
 os.environ.setdefault('OPENROUTER_API_KEY', 'test')
 os.environ.setdefault('SECRET_KEY', 'test')
 os.environ.setdefault('GC_LOGIN', 'test')
@@ -272,6 +272,54 @@ parse_case('bug35', '"N. Контент письма" + Тема:/Прехеде
     '<span>Прехедер: </span><span>Скидки закрываются сегодня вечером.</span></p>'
     '<p>Первый абзац письма.</p>',
     _check_bug35)
+
+# --- #36 (this session): mid-paragraph "Бот общий" label with NO parens, glued
+# between the end of the previous bot's ad footer and the start of the next
+# bot's content, all in one <p>. _get_trailing_tg_label only matched
+# "Бот (общий)"/"<x> (бот)" (parens required); a plain no-parens label sitting
+# mid-paragraph fell through untouched, so the whole next bot's text got
+# appended onto the PREVIOUS bot's tg_subsection instead of starting a new one.
+def _check_bug36(parsed):
+    variants = parsed.get('tg_variants') or []
+    if len(variants) < 2:
+        return (False, f'expected 2 tg_variants (1 клик + общий), got {len(variants)}')
+    v2_html = variants[1].get('html', '')
+    leaked_label = 'бот общий' in v2_html.lower()
+    has_new_content = 'новый вариант текста без скобок' in v2_html.lower()
+    return (not leaked_label and has_new_content,
+            f'names={[v.get("name") for v in variants]} leaked_label={leaked_label} has_new_content={has_new_content}')
+
+parse_case('bug36', '"Бот общий" (no parens) trailing label glued mid-paragraph opens new tg_variant',
+    '<p>БОТ (1 клик)</p>'
+    '<p>Основной текст ГК-бота.</p>'
+    '<p>ИНН 9715401631<br/><br/><br/>'
+    '<b>Бот общий</b><br/><br/>Новый вариант текста без скобок.</p>',
+    _check_bug36)
+
+# --- #37 (this session): comment-footnote link (<sup><a href="#cmntN">) whose
+# immediately-preceding sibling is an EMPTY spacer span holding only a
+# paragraph-break <br/> (not the visible button text before it). Wrapping the
+# spacer itself in <a href> traps the <br/> inside the link; clean_tag_for_tg
+# then strips a lone '\n' from inside an <a>, silently deleting the line break
+# and gluing the button label straight onto the next sentence with zero
+# separation.
+def _check_bug37(parsed):
+    tg = parsed.get('tg_html') or ''
+    variants = parsed.get('tg_variants') or []
+    all_html = tg + ''.join(v.get('html', '') for v in variants)
+    m = re.search(r'<a href="https://example\.com/promo"[^>]*>(.*?)</a>', all_html, re.DOTALL)
+    link_has_text = bool(m and 'кнопка регистрации' in (m.group(1) or ''))
+    br_preserved = '<br' in all_html
+    return (link_has_text and br_preserved,
+            f'link_has_text={link_has_text} br_preserved={br_preserved} match={m.group(0) if m else None!r}')
+
+parse_case('bug37', 'Comment-footnote <a> must not wrap an empty <br>-only spacer, swallowing the line break',
+    '<p>Телеграм</p>'
+    '<p><span>👉 кнопка регистрации</span><span><br/></span>'
+    '<sup><a href="#cmnt1" id="cmnt_ref1">[a]</a></sup>'
+    '<span>Ниже идёт ещё одна строка после кнопки.</span></p>'
+    '<div class="footnote"><p><a href="#cmnt_ref1" id="cmnt1">[a]</a><span> https://example.com/promo</span></p></div>',
+    _check_bug37)
 
 
 def run():

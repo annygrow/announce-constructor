@@ -1347,11 +1347,31 @@ def _get_trailing_tg_label(tag):
         text_lower = text.lower()
         # "Бот (общий)" style, or "<label> (бот)" style (e.g. "в 1 клик (бот)",
         # "общий (бот)") — see matching case in is_section_header().
-        if not (re.match(r'^бот\s*\(', text_lower) or re.search(r'\(\s*бот\s*\)', text_lower)):
-            return None
-        if len(text) > 60:
-            return None
-        return text
+        if re.match(r'^бот\s*\(', text_lower) or re.search(r'\(\s*бот\s*\)', text_lower):
+            if len(text) > 60:
+                return None
+            return text
+        # Plain "Бот общий" / "Бот в 1 клик" style — no parens, just the label
+        # word followed by more words. Mirrors is_section_header()'s first-word
+        # check (tg_label_words), which already recognizes this shape when the
+        # label opens its OWN paragraph; this candidate needs the same check
+        # because here the label instead sits mid-paragraph, glued between the
+        # end of the previous bot's content and the start of the next bot's —
+        # e.g. "...РЕКЛАМА... ИНН 9715401631<br><br>Бот общий<br>🤹 Перестал...".
+        # Without this, such a paragraph never matches the parens-only pattern
+        # above, is_section_header() never gets a chance (it only runs on
+        # whole standalone paragraphs), and the entire next bot's content gets
+        # silently appended onto the previous bot's tg_subsection instead of
+        # starting a new one.
+        first_word = text_lower.split()[0] if text_lower.split() else ''
+        first_word = re.split(r'[-–—]', first_word)[0]
+        first_word_alpha = ''.join(ch for ch in first_word if ch.isalpha())
+        tg_label_words = {'телеграм', 'telegram', 'тг', 'tg', 'max', 'бот', 'bot',
+                           'нейрокот', 'помощник'}
+        if (first_word_alpha in tg_label_words and text_lower != first_word_alpha
+                and len(text) <= 40):
+            return text
+        return None
 
     return _split_merged_label_tag(tag, _match_label)
 
@@ -1484,6 +1504,41 @@ def resolve_comment_refs(html_str, cmnt_url_map):
                 word_prev.wrap(soup.new_tag('a', href=url))
                 sup.decompose()
                 continue
+
+        # If prev has no visible text at all, it's a spacer — most commonly a
+        # span holding only a paragraph-break <br/> (Google Docs shape:
+        # "...button label...<span><br/></span><sup>[f]</sup>..."). Wrapping
+        # the spacer itself in <a> traps that <br/> inside the link; downstream
+        # TG rendering (clean_tag_for_tg) then strips a lone '\n' from inside an
+        # <a>, silently deleting the paragraph break and gluing the button label
+        # to whatever text follows. Walk back past empty siblings to find the
+        # actual preceding content and wrap that instead, leaving the spacer(s)
+        # untouched so their <br/> keeps acting as a line break.
+        if not prev_text:
+            cursor = prev.previous_sibling
+            steps = 0
+            while cursor is not None and steps < 8:
+                cursor_text = (cursor.get_text().strip() if hasattr(cursor, 'get_text')
+                               else str(cursor).strip())
+                if cursor_text:
+                    break
+                cursor = cursor.previous_sibling
+                steps += 1
+            if cursor is not None:
+                if isinstance(cursor, NavigableString) and cursor.strip():
+                    new_a = soup.new_tag('a', href=url)
+                    cursor.replace_with(new_a)
+                    new_a.string = str(cursor)
+                    sup.decompose()
+                    continue
+                elif hasattr(cursor, 'name') and cursor.name in ('span', 'b', 'strong', 'i', 'em'):
+                    cursor.wrap(soup.new_tag('a', href=url))
+                    sup.decompose()
+                    continue
+            # No real content found further back either — drop the marker
+            # rather than wrap the empty spacer and swallow its <br/>.
+            sup.decompose()
+            continue
 
         # If prev is just a lone "]" (Google Docs split the button's closing bracket
         # into its own span), the actual button text lives in earlier sibling(s) that
