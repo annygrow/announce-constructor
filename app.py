@@ -3653,13 +3653,19 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
 
     # Auto-alternate simple blocks in a 3-step cycle: white → grey → dotted → white → …
     # Non-alternatable blocks influence cycle position:
-    #   CTA (blue)             → resets cycle to 0 (next plain block starts at white)
     #   block_2col_text_text_grey → counts as GREY (it always renders grey by
     #                             fixed default, not part of the alternation
     #                             itself), so the next plain block skips ahead
     #                             to dotted instead of repeating grey right after it
     #   img 2-col/image        → count as white, so next plain block becomes grey (pos=1)
-    #   button                 → transparent, doesn't affect the cycle
+    #   CTA (blue) / button    → transparent, doesn't affect the cycle. A CTA used to
+    #                             reset the cycle to white, but in decks that interleave
+    #                             a CTA after nearly every paragraph (common — "text, CTA,
+    #                             text, CTA, ...") that reset never let the cycle advance
+    #                             past white at all, so grey/dotted never appeared anywhere
+    #                             in the whole email even though the doc had plenty of
+    #                             plain paragraph blocks (2026-08-28, user request: keep
+    #                             the cycle running through CTAs instead of resetting).
     ALTERNATABLE = {'block_white', 'block_grey', 'block_dotted'}
     _CYCLE = ['block_white', 'block_grey', 'block_dotted']
     _CYCLE_FN = {'block_white': block_white, 'block_grey': block_grey, 'block_dotted': block_dotted}
@@ -3683,8 +3689,6 @@ def generate_email_html(email_section_html, channel_key, campaign, date, images,
                 ph = curr_meta.get('paragraphs_html', '')
                 curr_meta['type'] = new_type
                 raw_blocks[i] = (_CYCLE_FN[new_type](ph), curr_meta)
-        elif curr_type == 'block_blue_cta':
-            cycle_pos = 0  # next plain block starts fresh at white
         elif curr_type == 'block_2col_text_text_grey':
             cycle_pos = 2  # counts as grey → next plain block goes to dotted, not grey again
         elif curr_type.startswith('block_2col') or curr_type in ('block_image', 'block_image_text'):
