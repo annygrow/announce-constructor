@@ -1463,6 +1463,27 @@ def extract_footnotes(soup):
     return footnotes, cmnt_url_map
 
 
+def _find_earlier_matching_spans(tag):
+    """Find earlier siblings (within the same parent) that share tag's exact
+    tag name + class list — the Google Docs "repeated CTA line" pattern where
+    a producer pastes the same "<label> 👉 <placeholder>" line 2-3x in a row
+    (separated by <br/>) for visual emphasis, but only comments the LAST
+    occurrence. An identically-classed span earlier in the same paragraph is
+    unambiguously the same "insert link here" placeholder repeated, so it
+    should get the same href too — not just the occurrence nearest the
+    trailing comment marker. Already-linked spans are skipped."""
+    matches = []
+    target_classes = set(tag.get('class', []) or [])
+    cursor = tag.previous_sibling
+    while cursor is not None:
+        if hasattr(cursor, 'name') and cursor.name == tag.name:
+            cursor_classes = set(cursor.get('class', []) or [])
+            if cursor_classes == target_classes and not cursor.find_parent('a'):
+                matches.append(cursor)
+        cursor = cursor.previous_sibling
+    return matches
+
+
 def resolve_comment_refs(html_str, cmnt_url_map):
     """
     Pre-process HTML: for each <sup><a href="#cmntN">[x]</a></sup> pattern,
@@ -1532,6 +1553,8 @@ def resolve_comment_refs(html_str, cmnt_url_map):
                     sup.decompose()
                     continue
                 elif hasattr(cursor, 'name') and cursor.name in ('span', 'b', 'strong', 'i', 'em'):
+                    for extra in _find_earlier_matching_spans(cursor):
+                        extra.wrap(soup.new_tag('a', href=url))
                     cursor.wrap(soup.new_tag('a', href=url))
                     sup.decompose()
                     continue
@@ -1573,6 +1596,8 @@ def resolve_comment_refs(html_str, cmnt_url_map):
             prev.replace_with(new_a)
             new_a.string = str(prev)
         elif hasattr(prev, 'name') and prev.name in ('span', 'b', 'strong', 'i', 'em'):
+            for extra in _find_earlier_matching_spans(prev):
+                extra.wrap(soup.new_tag('a', href=url))
             prev.wrap(soup.new_tag('a', href=url))
         elif hasattr(prev, 'name') and prev.name in ('p', 'div', 'h1', 'h2', 'h3', 'h4'):
             # <sup> is a block-level sibling (Google Docs puts it outside <p> in some tables).
@@ -4112,6 +4137,11 @@ def _strip_empty_format_tags(inner):
     return re.sub(r'<(b|i|u|s)>(\s*)</\1>', _repl, inner)
 
 
+_LINE_TOKEN_RE = re.compile(r'(<[^>]+>|\n)')
+_LINE_OPEN_TAG_RE = re.compile(r'^<(a|b|i|u|s)(\s[^>]*)?>$')
+_LINE_CLOSE_TAG_RE = re.compile(r'^</(a|b|i|u|s)>$')
+
+
 def _split_tg_paragraph_groups(inner):
     """
     Split a clean_tag_for_tg() output string into paragraph groups for the TG
@@ -4122,18 +4152,60 @@ def _split_tg_paragraph_groups(inner):
     downstream code inserts the normal inter-block spacer, rather than being
     glued into the same paragraph with a single soft-return separator.
 
+    A <b>/<i>/<u>/<s>/<a> that wraps text spanning one of these soft returns
+    (e.g. a producer bolds or links a whole multi-line CTA block) must survive
+    the split: naively cutting the string on '\\n' leaves the open tag on the
+    first resulting line and the matching close tag on the last, with nothing
+    on the lines in between — silently dropping the formatting/link from the
+    middle lines once each line is later treated as an independent unit (see
+    fix history: TG bot "Собрать заказ" CTA losing bold on lines 2-3, 2026-08-28).
+    So this walks the string once, tracking which of those tags are open at
+    each '\\n', closes them right before the break and reopens them right
+    after — giving every resulting line its own self-contained, balanced copy
+    of whatever was spanning the break.
+
     Returns a list of groups; each group is a list of balanced, non-empty line
     strings (soft-return lines within one paragraph). Empty groups are dropped,
     so the returned list may be empty if there was no visible content at all.
     """
     groups = []
     for group_raw in re.split(r'\n{2,}', inner):
-        lines = [ln.strip() for ln in group_raw.split('\n') if ln.strip()]
+        tokens = [t for t in _LINE_TOKEN_RE.split(group_raw) if t]
+        lines = []
+        current = []
+        open_stack = []  # list of (tag_name, opening_tag_text), outermost first
+        for tok in tokens:
+            if tok == '\n':
+                for name, _ in reversed(open_stack):
+                    current.append(f'</{name}>')
+                lines.append(''.join(current))
+                current = [opentag for _, opentag in open_stack]
+                continue
+            m_open = _LINE_OPEN_TAG_RE.match(tok)
+            m_close = _LINE_CLOSE_TAG_RE.match(tok)
+            if m_open:
+                open_stack.append((m_open.group(1), tok))
+                current.append(tok)
+            elif m_close:
+                name = m_close.group(1)
+                for j in range(len(open_stack) - 1, -1, -1):
+                    if open_stack[j][0] == name:
+                        open_stack.pop(j)
+                        break
+                current.append(tok)
+            else:
+                current.append(tok)
+        lines.append(''.join(current))
+        lines = [ln.strip() for ln in lines]
         # Skip lines that are only HTML tags with no visible text — artifact from
-        # <br/> inside bold/italic wrappers (e.g. <b> alone from <b><br/>text</b> split).
+        # <br/> inside bold/italic wrappers (e.g. <b> alone from <b><br/>text</b>
+        # split), or a leftover carried-tag wrapper with nothing inside it.
         lines = [ln for ln in lines if re.sub(r'<[^>]+>', '', ln).strip()]
         if not lines:
             continue
+        # Defensive: balance any tags still left unmatched within a single line
+        # (e.g. malformed source markup) — the carry-forward above already
+        # handles tags that legitimately span a line break.
         balanced = []
         for line in lines:
             for t in ('i', 'b', 'u', 's'):
@@ -4143,6 +4215,12 @@ def _split_tg_paragraph_groups(inner):
                     line += f'</{t}>' * (open_count - close_count)
                 elif close_count > open_count:
                     line = f'<{t}>' * (close_count - open_count) + line
+            no_a = len(re.findall(r'<a\s+href="[^"]*"[^>]*>', line))
+            nc_a = line.count('</a>')
+            if no_a > nc_a:
+                line += '</a>' * (no_a - nc_a)
+            elif nc_a > no_a:
+                line = re.sub('</a>', '', line, count=nc_a - no_a)
             balanced.append(line)
         groups.append(balanced)
     return groups

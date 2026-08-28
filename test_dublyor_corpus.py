@@ -63,6 +63,14 @@ def parse_case(cid, desc, body_html, check_fn):
     CASES.append((cid, desc, 'parse', body_html, check_fn))
 
 
+def custom_case(cid, desc, check_fn):
+    # kind == 'custom' -> payload is unused, check(mod) gets the loaded app module
+    # directly — for cases that exercise a generator function (generate_tg_bots/
+    # generate_tg_html) rather than the section-boundary detection parse_doc_html
+    # covers.
+    CASES.append((cid, desc, 'custom', None, check_fn))
+
+
 # --- #1/#2: "Почта" not recognized as email trigger; merged "Телеграм🎉..." ---
 header_case('bug01a', 'Почта — standalone email trigger', '<p>Почта</p>', 'email_section')
 header_case('bug02', 'Merged "Телеграм" + first TG line in one <p>',
@@ -322,6 +330,47 @@ parse_case('bug37', 'Comment-footnote <a> must not wrap an empty <br>-only space
     _check_bug37)
 
 
+# --- #39 (this session): a comment-footnote link ([sup][a href="#cmntN"]) sits
+# after a REPEATED "<label> 👉 <placeholder>" line pasted 2x in a row (separated
+# by <br/>) — the producer's way of asking for the same link on every line of a
+# multi-line CTA. resolve_comment_refs only wrapped the placeholder nearest the
+# marker (the 2nd occurrence); the 1st, identically-classed placeholder earlier
+# in the same paragraph was left as plain unlinked text.
+def _check_bug39(parsed):
+    tg = parsed.get('tg_html') or ''
+    count = tg.count('<a href="https://example.com/promo">')
+    return (count == 2, f'expected 2 linked occurrences (one per repeated CTA line), got {count}: {tg!r}')
+
+parse_case('bug39', 'Repeated "label 👉 ссылка" CTA line (x2 via <br/>) — comment ref must link BOTH, not just the nearest',
+    '<p>Телеграм</p>'
+    '<p><span>Собрать заказ 👉 </span><span class="c15">ссылка</span><span><br/></span>'
+    '<span>Собрать заказ 👉 </span><span class="c15">ссылка</span><span><br/></span>'
+    '<sup><a href="#cmnt1" id="cmnt_ref1">[a]</a></sup></p>'
+    '<div class="footnote"><p><a href="#cmnt_ref1" id="cmnt1">[a]</a><span> https://example.com/promo</span></p></div>',
+    _check_bug39)
+
+# --- #40 (this session): a <b>/<a> that wraps text spanning a soft return
+# (<br/> -> '\n') must survive _split_tg_paragraph_groups splitting that text
+# into separate lines. Naive split-then-independently-rebalance-per-line left
+# the open tag on line 1, nothing on lines 2+, and only "self-healed" the <a>
+# (via a later whole-block rebalance that generate_tg_bots doesn't have) while
+# permanently losing <b> on lines 2/3 — reproduced from a real TG bot mailing
+# where a 3-line "👉 посчитать свой заказ" CTA lost its bold on lines 2-3 and
+# (in generate_tg_bots specifically) its link entirely.
+def _check_bug40(mod_):
+    html = ('<p><a href="https://example.com/promo">'
+            '<span style="font-weight:700">line one<br/>line two<br/>line three<br/></span>'
+            '</a></p>')
+    out = mod_.generate_tg_bots(html, 'tg_voronki', 'camp', '01.01.26')
+    count_a = out.count('<a href="https://example.com/promo')
+    count_b = out.count('<b>')
+    ok = count_a == 3 and count_b == 3
+    return (ok, f'expected 3x <a> and 3x <b> (one self-contained pair per line), got a={count_a} b={count_b}: {out!r}')
+
+custom_case('bug40', 'Multi-line <a><b>...<br/>...</b></a> must not lose bold/link on lines 2+ after per-line split',
+    _check_bug40)
+
+
 def run():
     passed, failed = 0, 0
     for cid, desc, kind, payload, check in CASES:
@@ -330,6 +379,8 @@ def run():
                 tag = _tag(payload)
                 result = mod.is_section_header(tag, ai_hints=None)
                 ok, detail = check(result)
+            elif kind == 'custom':
+                ok, detail = check(mod)
             else:
                 parsed = mod.parse_doc_html(_doc(payload), ai_hints=None)
                 ok, detail = check(parsed)
