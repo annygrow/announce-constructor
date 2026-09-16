@@ -370,6 +370,24 @@ def _check_bug40(mod_):
 custom_case('bug40', 'Multi-line <a><b>...<br/>...</b></a> must not lose bold/link on lines 2+ after per-line split',
     _check_bug40)
 
+# --- #42: positional "Кампания:" tag (Format 2) lost when Google Docs exports the
+# bullet list as plain <p>"• text" paragraphs instead of real <li> elements ---
+def _check_bug42(parsed):
+    got = parsed.get('doc_campaign')
+    ok = got == 'demo-vibe-code-kids-mailing'
+    return (ok, f'doc_campaign: got {got!r}, expected \'demo-vibe-code-kids-mailing\'')
+
+parse_case('bug42', 'Positional campaign slug in plain-<p> bullets ("• slug"/"• date"/"• time"), not real <li>',
+    '<p>1. Кампания:</p>'
+    '<p>• demo-vibe-code-kids-mailing</p>'
+    '<p>• 17.09</p>'
+    '<p>• 08:00</p>'
+    '<p>2. Каналы (выделить нужным исключением)</p>'
+    '<p>Почта</p>'
+    '<p>Тема: Тестовая тема</p>'
+    '<p>Текст письма.</p>',
+    _check_bug42)
+
 
 def run():
     passed, failed = 0, 0

@@ -2423,8 +2423,11 @@ def parse_doc_html(html_content, ai_hints=None):
             doc_date = _norm_date(m2.group(1).strip())
 
     # Pass 2: if still missing, use positional heuristic (Format 2)
+    # Google Docs sometimes exports the bullet list as plain <p> paragraphs with a
+    # literal "•" text prefix instead of real <li> elements — those land in p_items,
+    # not li_items, so the positional slug/date scan below must cover both.
     if not doc_campaign or not doc_date:
-        for item in li_items:
+        for item in li_items + [re.sub(r'^[-•]\s*', '', p) for p in p_items]:
             if not item:
                 continue
             if re.match(r'^\d{1,2}:\d{2}$', item):  # time like "08:00" — skip
