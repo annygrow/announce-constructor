@@ -569,6 +569,27 @@ def block_button(btn_url, btn_text, paragraphs_html=''):
         '</td></tr>'
     )
 
+def _insert_button_in_paragraphs(paragraphs_html, btn_position, btn_url, btn_text):
+    """Inserts a centered CTA button among paragraphs at btn_position (count of
+    paragraphs before the button), so white/grey/dotted blocks keep their button
+    INSIDE the same bordered card when switched from block_blue_cta/block_button
+    via the type dropdown, instead of losing it. Falls back to appending after
+    all paragraphs when the original position wasn't recorded."""
+    btn_style = (
+        "background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
+        "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
+        "font-size:16px;display:inline-block;font-weight:600"
+    )
+    btn_div = f'<div align="center" style="padding:10px 0 4px"><a href="{btn_url}" target="_blank" style="{btn_style}">{btn_text}</a></div>'
+    if not paragraphs_html.strip():
+        return btn_div
+    soup = BeautifulSoup(paragraphs_html, 'html.parser')
+    paras = soup.find_all(['p', 'ul', 'ol'])
+    paras_html = [str(p) for p in paras if str(p).strip()] if paras else [paragraphs_html]
+    pos = btn_position if btn_position is not None else len(paras_html)
+    pos = max(0, min(pos, len(paras_html)))
+    return '\n'.join(paras_html[:pos] + [btn_div] + paras_html[pos:])
+
 def block_spacer(height=20):
     """Vertical spacer between blocks."""
     return (
@@ -4862,6 +4883,7 @@ def api_assemble_email():
         ph = block.get('paragraphs_html', '')
         btn_text = block.get('btn_text', '')
         btn_url_utm = block.get('btn_url_utm', '#')
+        has_inline_btn = btype in ('block_white', 'block_grey', 'block_dotted') and bool(btn_text) and bool(btn_url_utm) and btn_url_utm != '#'
 
         if btype == 'block_blue_cta':
             buttons = block.get('buttons') or [{'text': btn_text, 'url': btn_url_utm}]
@@ -4932,9 +4954,11 @@ def api_assemble_email():
                 + '</table></td></tr>'
             )
         elif btype == 'block_grey':
-            row = block_grey(ph, block.get('image_url', ''))
+            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text) if has_inline_btn else ph
+            row = block_grey(ph2, block.get('image_url', ''))
         elif btype == 'block_dotted':
-            row = block_dotted(ph, block.get('image_url', ''))
+            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text) if has_inline_btn else ph
+            row = block_dotted(ph2, block.get('image_url', ''))
         elif btype == 'block_blue_text':
             row = block_blue_text(ph, block.get('image_url', ''))
         elif btype == 'block_button':
@@ -4955,6 +4979,9 @@ def api_assemble_email():
             row = block_2col_text_text_grey(ph, block.get('col2_html', ''))
         elif btype == 'block_3col_text':
             row = block_3col_text(ph, block.get('col2_html', ''), block.get('col3_html', ''))
+        elif btype == 'block_white':
+            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text) if has_inline_btn else ph
+            row = block_white(ph2, block.get('image_url', ''))
         else:
             row = block_white(ph, block.get('image_url', ''))
         content_rows.append(row)

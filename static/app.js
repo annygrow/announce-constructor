@@ -74,6 +74,12 @@ const BLOCK_LABELS = {
   block_3col_text:      '3 колонки',
 };
 
+// Block types whose editor card shows the button text/URL fields. White/grey/dotted
+// are included so a button already on a block (e.g. switched over from Синий CTA /
+// Кнопка) stays visible/editable and doesn't silently vanish when the block-type
+// dropdown is used to change the visual style.
+const CTA_BUTTON_BLOCK_TYPES = ['block_blue_cta', 'block_button', 'block_white', 'block_grey', 'block_dotted'];
+
 // ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------
@@ -483,7 +489,7 @@ function createBlockCard(block, idx, channelKey, total) {
   const preview   = escapeHtml((block.preview_text || '').substring(0, 50));
   const isFirst   = idx === 0;
   const isLast    = idx === total - 1;
-  const isCta     = ['block_blue_cta', 'block_button'].includes(block.type);
+  const isCta     = CTA_BUTTON_BLOCK_TYPES.includes(block.type);
   const btnHasText = block.type === 'block_button' && (block.paragraphs_html || '').trim().length > 0;
   const isNoText  = block.type === 'block_spacer' || (block.type === 'block_button' && !btnHasText);
   const is3col    = block.type === 'block_3col_text';
@@ -804,7 +810,7 @@ function cancelBlockEdit(channelKey, idx) {
     if (ta2) ta2.value = paragraphsHtmlToText(block.col2_html || '');
     const ta3 = area.querySelector('.block-edit-col3');
     if (ta3) ta3.value = paragraphsHtmlToText(block.col3_html || '');
-    if (['block_blue_cta', 'block_button'].includes(block.type)) {
+    if (CTA_BUTTON_BLOCK_TYPES.includes(block.type)) {
       const btnTf = area.querySelector('.btn-text-field');
       const btnUf = area.querySelector('.btn-url-field');
       if (btnTf) btnTf.value = block.btn_text || '';
@@ -842,14 +848,22 @@ function saveBlockEdit(channelKey, idx) {
     if (ta3) block.col3_html = makeParaHtml(ta3.value, '#333333', _fontSizeForBlockType(block.type));
   }
 
-  if (['block_blue_cta', 'block_button'].includes(block.type)) {
+  if (CTA_BUTTON_BLOCK_TYPES.includes(block.type)) {
     const btnTf = area.querySelector('.btn-text-field');
     const btnUf = area.querySelector('.btn-url-field');
-    if (btnTf) { block.btn_text = btnTf.value; block.preview_text = btnTf.value.substring(0, 50); }
+    // Only block_blue_cta/block_button have no independent paragraph preview text —
+    // white/grey/dotted keep the paragraph-derived preview set above instead.
+    const overwritesPreview = ['block_blue_cta', 'block_button'].includes(block.type);
+    if (btnTf) {
+      block.btn_text = btnTf.value;
+      if (overwritesPreview) block.preview_text = btnTf.value.substring(0, 50);
+    }
     if (btnUf) {
       block.btn_url_utm = btnUf.value;
-      // Sync buttons array so api_assemble_email uses the updated URL
-      block.buttons = [{ text: block.btn_text || '', url: btnUf.value }];
+      if (overwritesPreview) {
+        // Sync buttons array so api_assemble_email uses the updated URL
+        block.buttons = [{ text: block.btn_text || '', url: btnUf.value }];
+      }
     }
   }
 
