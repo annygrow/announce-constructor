@@ -5167,6 +5167,9 @@ def _gc_fix_mailing_playwright(mailing_id, transport, job_id=None):
         browser = pw.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
+            # Routed through agent_guard (mitmdump on 8081, see agent_guard/README.md) so
+            # this bot can never send "Готово к отправке" / approve a process on its own.
+            proxy={'server': 'http://127.0.0.1:8081'},
         )
         ctx = browser.new_context(viewport={'width': 1280, 'height': 900})
         ctx.add_cookies(pw_cookies)
