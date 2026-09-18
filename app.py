@@ -5174,7 +5174,10 @@ def _gc_fix_mailing_playwright(mailing_id, transport, job_id=None):
             # this bot can never send "Готово к отправке" / approve a process on its own.
             proxy={'server': 'http://127.0.0.1:8081'},
         )
-        ctx = browser.new_context(viewport={'width': 1280, 'height': 900})
+        # mitmdump terminates TLS with its own self-signed cert; without this,
+        # every page.goto() through the proxy fails with ERR_CERT_AUTHORITY_INVALID
+        # (see agent_guard/README.md, section 2, вариант А).
+        ctx = browser.new_context(viewport={'width': 1280, 'height': 900}, ignore_https_errors=True)
         ctx.add_cookies(pw_cookies)
         page = ctx.new_page()
         try:
