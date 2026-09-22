@@ -388,6 +388,82 @@ parse_case('bug42', 'Positional campaign slug in plain-<p> bullets ("• slug"/"
     '<p>Текст письма.</p>',
     _check_bug42)
 
+# --- #43: TG section header matched only via the whole-paragraph "(бот)" regex
+# (e.g. "в 1 клик (бот)"), not via the tg_label_words first-word check — real TG
+# intro content glued after it via <br><br> in the same <p>/span used to be
+# dropped entirely (is_merged stayed False since "в" isn't a TG label word),
+# so generation jumped straight to whatever separate <p> came next (a CTA button)
+# and silently lost the headline + greeting paragraphs before it. ---
+def _check_bug43(parsed):
+    tg_html = parsed.get('tg_html') or ''
+    has_headline = 'заголовок рассылки' in tg_html.lower()
+    has_greeting = '{first_name}' in tg_html and 'привет' in tg_html.lower()
+    has_label = 'в 1 клик' in tg_html.lower() or '(бот)' in tg_html.lower()
+    ok = has_headline and has_greeting and not has_label
+    return (ok, f'has_headline={has_headline} has_greeting={has_greeting} has_label={has_label}: {tg_html!r}')
+
+parse_case('bug43', '"в 1 клик (бот)" label glued via <br><br> to real TG intro content in same <p>',
+    '<p>1. Кампания:</p>'
+    '<p>4. Контент письма</p>'
+    '<p>Тема: Тестовая тема</p>'
+    '<p>Текст письма.</p>'
+    '<p><span>в 1 клик (бот)<br/><br/>📋 Заголовок рассылки<br/><br/>'
+    '{first_name}, привет! Текст рассылки.</span></p>',
+    _check_bug43)
+
+# --- #44: leading <br/> inside the SAME span as a "Прехедер:"/"Тема:" label
+# (a blank-line artifact Google Docs puts before the label) used to make
+# normalize_br_lines() leave that span untouched (only 1 non-empty line
+# survived, under the old "> 1" guard) — but the span still carried the old
+# internal <br/>, which _consume_leading_meta()'s group-boundary scan then
+# read as "boundary right after the label", separating it from its own value
+# sitting in the very next sibling span. The label-only text ("Прехедер:")
+# then failed the "label: value" regex (nothing captured after the colon),
+# so subject/preview stayed empty and the raw label+value leaked into the
+# email body untouched instead of being consumed as metadata. ---
+def _check_bug44(parsed):
+    preview = parsed.get('preview') or ''
+    subject = parsed.get('subject') or ''
+    email_html = parsed.get('email_html') or ''
+    ok = (preview == 'Значение прехедера.' and subject == 'Значение темы.'
+          and 'прехедер' not in email_html.lower() and 'тема:' not in email_html.lower())
+    return (ok, f'subject={subject!r} preview={preview!r} email_html={email_html!r}')
+
+parse_case('bug44', 'Leading <br/> inside label span splits "Прехедер:"/"Тема:" from its value in the next sibling span',
+    '<p>1. Кампания:</p>'
+    '<p>4. Контент письма</p>'
+    '<p><span><br/>Прехедер: </span><span>Значение прехедера.</span></p>'
+    '<p><span><br/>Тема: </span><span>Значение темы.</span></p>'
+    '<p>Текст письма.</p>',
+    _check_bug44)
+
+# --- #45: normalize_br_lines() was collapsing every <br>-run to a single <br>
+# regardless of how many consecutive <br> the source actually had. A DOUBLE
+# <br><br> between two lines inside the same span (Google Docs' way of coding
+# an actual blank-line paragraph gap when both lines got typed inside one
+# <span>) got flattened to one <br> — turning what should render as two
+# separate, blank-line-spaced blocks in generate_tg_bots into one glued block
+# with only a soft line-wrap between them. This is bug #43's own repro
+# (headline<br><br>greeting<br><br>third line, all inside the "в 1 клик (бот)"
+# merged <p>) but checked through generate_tg_bots' actual paragraph grouping
+# instead of just checking substrings are present in tg_html. ---
+def _check_bug45(mod_):
+    # generate_tg_bots() takes already-section-stripped HTML in production (the
+    # label is removed upstream by process_block/parse_doc_html) — this test
+    # calls it directly, so the label itself still shows up as its own block
+    # here; what's under test is only whether the double <br><br> after it
+    # (and after the headline) survive as real block separators.
+    html = ('<p><span>в 1 клик (бот)<br/><br/>Заголовок рассылки<br/><br/>'
+            '{first_name}, привет! Текст рассылки.</span></p>')
+    out = mod_.generate_tg_bots(html, 'tg_gc', 'camp', '01.01.26')
+    parts = [p.strip() for p in out.split('\n\n') if p.strip()]
+    ok = (len(parts) == 4 and parts[1] == 'Заголовок рассылки'
+          and '{first_name}' in parts[2] and 'привет' in parts[2])
+    return (ok, f'expected 4 blank-line-separated blocks (label/headline/greeting/disclaimer), got {len(parts)}: {parts!r}')
+
+custom_case('bug45', 'Double <br><br> inside one <span> must survive as a real paragraph gap in generate_tg_bots, not collapse to one <br>',
+    _check_bug45)
+
 
 def run():
     passed, failed = 0, 0

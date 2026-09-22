@@ -1174,29 +1174,63 @@ def normalize_br_lines(tag_copy):
         if any(hasattr(n, 'contents') and getattr(n, 'name', None) != 'br'
                for n in child.contents):
             continue  # deeper nested tag inside — leave this child alone
-        lines, current = [], []
-        for node in child.contents:
+        # Track, per line, exactly how many CONSECUTIVE <br> immediately
+        # followed it in the source (0 for the last line, unless the child's
+        # contents happened to end on a <br> run too — that shows up as an
+        # empty trailing segment and gets filtered out below). This count must
+        # be reproduced exactly, not collapsed to "0 or 1":
+        # - A LEADING <br> (blank-line artifact before the real text, e.g.
+        #   Google Docs export of "Прехедер: <content>" glued after a preceding
+        #   empty line) must NOT give the surviving line a synthetic trailing
+        #   <br> of its own — that fabricates a boundary that never existed,
+        #   splitting a label like "Прехедер: " from its value sitting in the
+        #   very next sibling span, so downstream <br>-boundary scans
+        #   (_consume_leading_meta, _split_merged_label_tag) never see them as
+        #   the same line and the label/value regex fails (nothing after ":").
+        # - A DOUBLE <br><br> between two real lines (Google Docs' way of
+        #   representing an actual blank-line paragraph gap when both lines
+        #   got typed inside the same <span>) must survive as two <br>, not
+        #   get collapsed to one — collapsing it makes a real paragraph break
+        #   look like a mere soft line-wrap. generate_tg_bots's own paragraph
+        #   grouping (_split_tg_paragraph_groups) depends on seeing 2+
+        #   consecutive line breaks to know a line starts a new, separately
+        #   spaced block instead of staying glued to the previous one.
+        segments = []
+        current_text_parts = []
+        contents = list(child.contents)
+        i = 0
+        while i < len(contents):
+            node = contents[i]
             if getattr(node, 'name', None) == 'br':
-                lines.append(current)
-                current = []
+                br_count = 0
+                while i < len(contents) and getattr(contents[i], 'name', None) == 'br':
+                    br_count += 1
+                    i += 1
+                segments.append((''.join(current_text_parts), br_count))
+                current_text_parts = []
             else:
-                current.append(str(node))
-        lines.append(current)
+                current_text_parts.append(str(node))
+                i += 1
+        segments.append((''.join(current_text_parts), 0))
         new_children = []
-        for line in lines:
-            line_text = ''.join(line)
+        for line_text, br_count in segments:
             if not line_text.strip():
                 continue
             clone = BeautifulSoup(f'<{child.name}></{child.name}>', 'lxml').find(child.name)
             for attr, val in child.attrs.items():
                 clone[attr] = val
             clone.append(NavigableString(line_text))
-            clone.append(BeautifulSoup('<br>', 'lxml').br)
+            for _ in range(br_count):
+                clone.append(BeautifulSoup('<br>', 'lxml').br)
             new_children.append(clone)
-        if len(new_children) > 1:
+        # Always rebuild once we've reached here (this child is guaranteed to
+        # contain at least one <br>, per the continue-guard above) — even a
+        # single surviving line needs rebuilding when a leading/trailing blank
+        # line was dropped, so its <br> shape now matches its true boundaries.
+        if new_children:
             for nc in new_children:
                 child.insert_before(nc)
-            child.extract()
+        child.extract()
 
 
 def _split_merged_label_tag(tag, _match_label):
@@ -2200,6 +2234,42 @@ def parse_doc_html(html_content, ai_hints=None):
                         if not empty_wrapper.get_text(strip=True) and not empty_wrapper.find():
                             empty_wrapper.decompose()
                     if get_text_content(tag_copy).strip():
+                        tg_subsections[-1]['blocks'].append(tag_copy)
+            elif tag.find('br'):
+                # Label glued via <br><br> to further real content as separate
+                # sibling spans within the same <p> (mirrors the email_section
+                # handling above), e.g. "в 1 клик (бот)<br><br>📋 Заголовок
+                # рассылки...<br><br>{first_name}, привет!...". The is_merged
+                # check above only catches a label that's literally the first
+                # WORD of one run-on span with no line break; it misses this
+                # bigger, <br>-separated shape (the classification regex for
+                # "в 1 клик (бот)" in is_section_header() matches on the whole
+                # blob, not just the first word) — without this the whole
+                # paragraph, label AND the real TG intro content after it, was
+                # silently dropped instead of becoming this subsection's content.
+                tag_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                if tag_copy:
+                    normalize_br_lines(tag_copy)
+                    to_remove = []
+                    for child in list(tag_copy.children):
+                        child_text = (child.get_text(' ', strip=True) if hasattr(child, 'get_text')
+                                      else str(child)).replace('\xa0', ' ').strip()
+                        if not child_text:
+                            to_remove.append(child)
+                            continue
+                        child_lower = child_text.lower()
+                        child_first_raw = child_text.split()[0] if child_text.split() else ''
+                        child_first_alpha = ''.join(ch for ch in child_first_raw if ch.isalpha()).lower()
+                        is_paren_bot = bool(re.match(r'^.{0,40}?\(\s*бот\s*\)', child_lower))
+                        is_label_word = (child_first_alpha in tg_label_words
+                                         and child_lower != child_first_alpha)
+                        if is_paren_bot or is_label_word:
+                            to_remove.append(child)
+                            continue
+                        break  # first child that isn't a recognized label — stop
+                    for child in to_remove:
+                        child.extract()
+                    if to_remove and get_text_content(tag_copy).strip():
                         tg_subsections[-1]['blocks'].append(tag_copy)
             return
         if section_type in ('subject', 'preview'):
