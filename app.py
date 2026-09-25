@@ -5105,12 +5105,6 @@ def api_generate_utm():
 
 GC_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gc_output')
 
-# Bot field per GC transport (found via JS dump of select options)
-_BOT_FIELD = {
-    'ticket': 'ParamsObject[telegram_bot_id]',
-    'max':    'ParamsObject[max_bot_id]',
-}
-
 def _gc_login_session():
     """Return (authenticated requests.Session, gc_url) or (None, None).
     Uses the real AJAX login flow that GC's JS uses."""
@@ -5165,67 +5159,24 @@ def _gc_login_session():
         logging.warning(f'[GC Login] {e}')
     return None, None
 
-def _gc_fix_bot(mailing_id, transport):
-    """Set bot to 'Любой бот' (id=0) on a TG or MAX GC mailing draft.
-    Reads the full mailing form, flips only the bot select, then saves."""
-    bot_field = _BOT_FIELD.get(transport)
-    if not bot_field:
-        return
-    s, gc_url = _gc_login_session()
-    if not s:
-        logging.warning('[GC Bot Fix] GC login failed')
-        return
-    url = f'{gc_url}/notifications/control/mailings/update/id/{mailing_id}/part/main'
-    try:
-        page_resp = s.get(url, timeout=15)
-        soup = BeautifulSoup(page_resp.text, 'html.parser')
-        form = soup.find('form', id='yw0')
-        if not form:
-            logging.warning(f'[GC Bot Fix] form#yw0 not found for mailing {mailing_id}')
-            return
-        # Collect all form field values
-        post_data = {}
-        for inp in form.find_all(['input', 'textarea', 'select']):
-            name = inp.get('name')
-            if not name:
-                continue
-            if inp.name == 'select':
-                selected = inp.find('option', selected=True)
-                post_data[name] = selected['value'] if selected else (inp.find('option') or {}).get('value', '')
-            elif inp.name == 'textarea':
-                post_data[name] = inp.get_text()
-            else:
-                itype = inp.get('type', 'text').lower()
-                if itype in ('checkbox', 'radio') and not inp.get('checked'):
-                    continue
-                post_data[name] = inp.get('value', '')
-        # Override bot to "Любой бот"
-        post_data[bot_field] = '0'
-        post_data['save'] = '1'
-        resp = s.post(url, data=post_data, timeout=20, allow_redirects=True)
-        logging.info(f'[GC Bot Fix] mailing={mailing_id} field={bot_field} status={resp.status_code}')
-    except Exception as e:
-        logging.warning(f'[GC Bot Fix] {e}')
-
-
-def _gc_fix_mailing_playwright(mailing_id, transport, job_id=None):
-    """Configure GC mailing via Playwright: set bot (TG/Max) or recipient type (email)."""
+def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender_name=None, tags=None):
+    """Create a GC mailing draft end-to-end via our own Playwright session:
+    open the "new mailing" form, fill name/category/transport, submit to get an id,
+    then set the HTML body (and transport-specific fields) on the resulting draft."""
     gc_url_base = os.getenv('GC_ACCOUNT_URL', '').rstrip('/')
     if not gc_url_base:
-        logging.warning('[GC PW Fix] GC_ACCOUNT_URL not configured')
+        _jobs_write(job_id, status='error', error='GC_ACCOUNT_URL не настроен в .env')
         return
 
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        logging.warning('[GC PW Fix] playwright not installed; falling back to HTTP fix')
-        _gc_fix_bot(mailing_id, transport)
+        _jobs_write(job_id, status='error', error='Playwright не установлен на сервере')
         return
 
-    # Reuse existing HTTP login to get authenticated session cookies
     s, _ = _gc_login_session()
     if not s:
-        logging.warning('[GC PW Fix] GC login failed')
+        _jobs_write(job_id, status='error', error='Не удалось залогиниться в GetCourse')
         return
 
     domain = gc_url_base.replace('https://', '').replace('http://', '')
@@ -5233,8 +5184,6 @@ def _gc_fix_mailing_playwright(mailing_id, transport, job_id=None):
         {'name': c.name, 'value': c.value, 'domain': domain, 'path': c.path or '/'}
         for c in s.cookies
     ]
-
-    page_url = f'{gc_url_base}/notifications/control/mailings/update/id/{mailing_id}'
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -5251,19 +5200,76 @@ def _gc_fix_mailing_playwright(mailing_id, transport, job_id=None):
         ctx.add_cookies(pw_cookies)
         page = ctx.new_page()
         try:
-            page.goto(page_url, timeout=30000)
+            page.goto(f'{gc_url_base}/notifications/control/mailings/new', timeout=30000)
             page.wait_for_load_state('networkidle', timeout=20000)
 
+            page.fill('#Mailing_title', name)
+            if sender_name:
+                page.fill('#Mailing_sendFrom', sender_name)
+            # Category and transport are select2-hidden native <select>s — set the
+            # underlying value directly and trigger jQuery change so select2 picks it up.
+            page.evaluate(
+                "document.getElementById('w1').value = '0'; "
+                "if (window.jQuery) jQuery('#w1').trigger('change');"
+            )
+            page.evaluate(
+                "(t) => { document.getElementById('transport').value = t; "
+                "if (window.jQuery) jQuery('#transport').trigger('change'); }",
+                transport,
+            )
+            page.wait_for_timeout(500)
+
+            page.get_by_role('button', name='Создать рассылку').click()
+            page.wait_for_load_state('networkidle', timeout=20000)
+
+            m = re.search(r'/mailings/update/id/(\d+)', page.url)
+            if not m:
+                _jobs_write(job_id, status='error', error='Не удалось извлечь ID рассылки после создания')
+                return
+            mailing_id = m.group(1)
+            gc_url = f'{gc_url_base}/notifications/control/mailings/update/id/{mailing_id}'
+
+            if tags:
+                # The tags widget (span.gc-tags) lives outside form#yw0, so it never
+                # gets submitted with the main save — it persists via its own
+                # immediate AJAX call (same one the "Сохранить" button in the tags
+                # modal fires), independent of the rest of the draft.
+                try:
+                    type_id = page.evaluate(
+                        "() => { const el = document.querySelector('.gc-tags.gc-tags-editable'); "
+                        "return el ? el.dataset.objectTypeId : null; }"
+                    )
+                    if type_id:
+                        page.evaluate(
+                            "({typeId, objId, tagsStr}) => new Promise((resolve, reject) => {"
+                            "  ajaxCall('/pl/tag/set-object-tags?objectTypeId=' + typeId + '&objectId=' + objId,"
+                            "           {tags: tagsStr}, {}, resolve, reject);"
+                            "})",
+                            {'typeId': type_id, 'objId': mailing_id, 'tagsStr': ','.join(tags)},
+                        )
+                except Exception as e:
+                    logging.warning(f'[GC PW Create] job={job_id} tag save failed: {e}')
+
+            # Body editor is Summernote; setting via its own API bypasses the
+            # WYSIWYG/code-view toggle (which doesn't reliably sync raw HTML back in).
+            page.wait_for_selector('#Mailing_content', state='attached', timeout=10000)
+            page.evaluate(
+                "(html) => { if (window.jQuery) jQuery('#Mailing_content').summernote('code', html); }",
+                html,
+            )
+            page.wait_for_timeout(300)
+
             if transport in ('ticket', 'max'):
-                # TG and Max both use select#mailing_bot_id (only the name attr differs).
-                # Select2 hides the native select, so wait for DOM presence then set via jQuery.
+                # TG and Max both use select#mailing_bot_id, already defaulted to
+                # "Любой бот" (0) on a fresh draft — set explicitly for safety.
                 page.wait_for_selector('select#mailing_bot_id', state='attached', timeout=10000)
                 page.evaluate(
                     "if (window.jQuery) { jQuery('#mailing_bot_id').val('0').trigger('change'); }"
                 )
-                page.wait_for_timeout(800)
-
+                page.wait_for_timeout(500)
             elif transport == 'email':
+                page.wait_for_selector('#Mailing_subject', timeout=10000)
+                page.fill('#Mailing_subject', subject)
                 # Click "Сегмент" radio — recipients_type=segment
                 page.wait_for_selector('#ParamsObject_recipients_type_2', timeout=10000)
                 page.click('#ParamsObject_recipients_type_2')
@@ -5278,13 +5284,13 @@ def _gc_fix_mailing_playwright(mailing_id, transport, job_id=None):
             page.click('.btn-save-mailing')
             page.wait_for_load_state('networkidle', timeout=20000)
 
-            logging.info(f'[GC PW Fix] mailing={mailing_id} transport={transport} saved OK')
+            logging.info(f'[GC PW Create] mailing={mailing_id} transport={transport} name={name!r} saved OK')
+            _jobs_write(job_id, status='done', gc_url=gc_url, mailing_id=mailing_id)
         except Exception as e:
-            logging.warning(f'[GC PW Fix] mailing={mailing_id} transport={transport}: {e}')
+            logging.warning(f'[GC PW Create] job={job_id} transport={transport}: {e}')
+            _jobs_write(job_id, status='error', error=str(e))
         finally:
             browser.close()
-            if job_id:
-                _jobs_set_pw_done(job_id)
 
 
 _GC_TRANSPORT = {
@@ -5337,63 +5343,33 @@ def api_push_to_gc():
 
 @app.route('/api/push-to-mail', methods=['POST'])
 def api_push_to_mail():
+    import threading, uuid
     data = request.get_json(force=True)
     name = data.get('name', '').strip()
     subject = data.get('subject', '').strip()
     html = data.get('html', '').strip()
     channel_key = data.get('channel_key', 'email')
-    date_tag = data.get('date_tag', '')
-    preheader = data.get('preheader', '').strip()
     sender_name = data.get('sender_name', '').strip() or 'Университет Зерокодер'
     campaign = data.get('campaign', '').strip()
 
     if not name or not html:
         return jsonify({'error': 'Нужны name и html'}), 400
 
-    mail_url = os.getenv('MAIL_API_URL', 'https://mail.zerocoder.info')
-    mail_token = os.getenv('MAIL_API_TOKEN', '')
-    if not mail_token:
-        return jsonify({'error': 'MAIL_API_TOKEN не настроен в .env'}), 500
-
-    headers = {'Authorization': f'Bearer {mail_token}', 'Content-Type': 'application/json'}
+    transport = _GC_TRANSPORT.get(channel_key, 'email')
     mailing_tags = ['announce']
     if campaign:
         mailing_tags.append(campaign)
-    transport = _GC_TRANSPORT.get(channel_key, 'email')
-    mailing = {
-        'name': name,
-        'subject': subject,
-        'html': html,
-        'tags': mailing_tags,
-    }
-    payload = {
-        'category': '0',
-        'transport': transport,
-        'tags': [date_tag] if date_tag else [],
-        'mailings': [mailing],
-    }
+    job_id = uuid.uuid4().hex[:12]
+    _jobs_write(job_id, status='creating', error=None, gc_url=None)
 
-    logging.info(f"push-to-mail: name={name!r} html_len={len(html)} html_snippet={html[:120]!r} preheader={preheader!r}")
-    try:
-        resp = requests.post(f'{mail_url}/api/mailings', json=payload, headers=headers, timeout=30)
-        logging.info(f"push-to-mail response: status={resp.status_code} body={resp.text[:500]!r}")
-        if resp.status_code == 401:
-            return jsonify({'error': 'Неверный токен авторизации'}), 401
-        if resp.status_code == 400:
-            return jsonify({'error': 'Некорректный запрос: ' + resp.text}), 400
-        if resp.status_code == 422:
-            return jsonify({'error': 'Ошибка формата: ' + resp.text}), 422
-        resp.raise_for_status()
-        result = resp.json()
-        job_id = result.get('job_id')
-        if job_id and (transport in _BOT_FIELD or transport == 'email'):
-            _jobs_register(job_id, transport)
-        return jsonify({'ok': True, 'job_id': job_id, 'count': result.get('count', 1)})
-    except requests.RequestException as e:
-        return jsonify({'error': str(e)}), 500
-    except ValueError as e:
-        logging.exception("push-to-mail: non-JSON response from mail API")
-        return jsonify({'error': f'API вернул не-JSON ответ: {e}'}), 500
+    logging.info(f"push-to-mail: name={name!r} html_len={len(html)} html_snippet={html[:120]!r} transport={transport} tags={mailing_tags}")
+    threading.Thread(
+        target=_gc_create_mailing_playwright,
+        args=(job_id, name, subject, html, transport, sender_name, mailing_tags),
+        daemon=True,
+    ).start()
+
+    return jsonify({'ok': True, 'job_id': job_id, 'count': 1})
 
 
 # File-based job tracking — survives worker restarts and works across multiple gunicorn workers
@@ -5401,8 +5377,8 @@ _JOBS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gc_output
 _jobs_lock = __import__('threading').Lock()
 
 
-def _jobs_register(job_id, transport):
-    """Record that this job needs a post-creation fix for the given transport."""
+def _jobs_write(job_id, **fields):
+    """Merge fields into the job's stored state (status/gc_url/mailing_id/error)."""
     with _jobs_lock:
         os.makedirs(os.path.dirname(_JOBS_FILE), exist_ok=True)
         try:
@@ -5410,30 +5386,10 @@ def _jobs_register(job_id, transport):
                 data = json.load(f)
         except Exception:
             data = {}
-        data[str(job_id)] = {'transport': transport, 'fixed': False, 'pw_done': False}
+        data.setdefault(str(job_id), {})
+        data[str(job_id)].update(fields)
         with open(_JOBS_FILE, 'w') as f:
             json.dump(data, f)
-
-
-def _jobs_claim(job_id, mailing_id=None, gc_url=None):
-    """Atomically return transport and mark fix as started. Returns None if already started."""
-    with _jobs_lock:
-        try:
-            with open(_JOBS_FILE) as f:
-                data = json.load(f)
-        except Exception:
-            return None
-        job = data.get(str(job_id))
-        if job and not job.get('fixed'):
-            data[str(job_id)]['fixed'] = True
-            if mailing_id:
-                data[str(job_id)]['mailing_id'] = str(mailing_id)
-            if gc_url:
-                data[str(job_id)]['gc_url'] = gc_url
-            with open(_JOBS_FILE, 'w') as f:
-                json.dump(data, f)
-            return job.get('transport')
-        return None
 
 
 def _jobs_get(job_id):
@@ -5446,66 +5402,18 @@ def _jobs_get(job_id):
         return None
 
 
-def _jobs_set_pw_done(job_id):
-    """Mark the playwright fix as completed so job-status can release gc_url."""
-    with _jobs_lock:
-        try:
-            with open(_JOBS_FILE) as f:
-                data = json.load(f)
-        except Exception:
-            return
-        if str(job_id) in data:
-            data[str(job_id)]['pw_done'] = True
-            with open(_JOBS_FILE, 'w') as f:
-                json.dump(data, f)
-
-
 @app.route('/api/job-status/<job_id>')
 def api_job_status(job_id):
-    import threading
-    mail_url = os.getenv('MAIL_API_URL', 'https://mail.zerocoder.info')
-    mail_token = os.getenv('MAIL_API_TOKEN', '')
-    gc_domain = os.getenv('GC_DOMAIN', 'university.zerocoder.ru')
-    headers = {'Authorization': f'Bearer {mail_token}'}
-    try:
-        # If playwright fix is in progress, don't show the link yet
-        existing = _jobs_get(job_id)
-        if existing and existing.get('fixed') and not existing.get('pw_done'):
-            return jsonify({'status': 'configuring', 'gc_url': None, 'done': 0, 'total': 1})
-        # If playwright already done, return stored gc_url immediately
-        if existing and existing.get('pw_done') and existing.get('gc_url'):
-            return jsonify({'status': 'done', 'gc_url': existing['gc_url'], 'done': 1, 'total': 1})
-
-        resp = requests.get(f'{mail_url}/api/jobs/{job_id}', headers=headers, timeout=15)
-        job_data = resp.json()
-        logging.info(f"job-status {job_id}: {job_data}")
-        results = job_data.get('results', [])
-        gc_url = None
-        mailing_id = None
-        if results:
-            mailing_id = results[0].get('id') or results[0].get('mailing_id')
-            if mailing_id:
-                gc_url = f'https://{gc_domain}/notifications/control/mailings/update/id/{mailing_id}'
-
-        # Start fix once when mailing_id is known; withhold gc_url until fix completes
-        transport = _jobs_claim(job_id, mailing_id=mailing_id, gc_url=gc_url) if mailing_id else None
-        if transport:
-            threading.Thread(
-                target=_gc_fix_mailing_playwright,
-                args=(mailing_id, transport, job_id),
-                daemon=True,
-            ).start()
-            # Don't return gc_url yet — let playwright finish first
-            return jsonify({'status': 'configuring', 'gc_url': None, 'done': 0, 'total': 1})
-
-        return jsonify({
-            'status': job_data.get('status'),
-            'gc_url': gc_url,
-            'done': job_data.get('done', 0),
-            'total': job_data.get('total', 1),
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    job = _jobs_get(job_id)
+    if not job:
+        return jsonify({'error': 'Неизвестный job_id'}), 404
+    return jsonify({
+        'status': job.get('status'),
+        'gc_url': job.get('gc_url'),
+        'done': 1 if job.get('status') == 'done' else 0,
+        'total': 1,
+        'error': job.get('error'),
+    })
 
 
 if __name__ == '__main__':

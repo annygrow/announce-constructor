@@ -1302,13 +1302,21 @@ async function pollJobForUrl(jobId, statusEl, channelKey) {
         statusEl.textContent = '⏳ АИ-сотрудник настраивает рассылку...';
         continue;
       }
+      if (d.status === 'error') {
+        statusEl.textContent = '⚠ ' + (d.error || 'Ошибка создания рассылки');
+        return;
+      }
+      if (d.status === 'done') {
+        statusEl.textContent = '⚠ Рассылка помечена готовой, но ссылку получить не удалось. Проверьте вручную в GetCourse';
+        return;
+      }
       if (d.status && !['pending', 'processing', 'creating', 'configuring'].includes(d.status)) {
-        statusEl.textContent = '✓ Создано!';
+        statusEl.textContent = '⚠ Неожиданный статус (' + d.status + '). Проверьте вручную в GetCourse';
         return;
       }
     } catch (_) {}
   }
-  statusEl.textContent = '✓ Создано!';
+  statusEl.textContent = '⚠ Не удалось подтвердить создание за 2 минуты. Проверьте вручную в GetCourse';
 }
 
 // ---------------------------------------------------------------------------
