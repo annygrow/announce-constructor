@@ -197,8 +197,8 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 
 ‼️ ИСКЛЮЧЕНИЕ из правила "1 клик": если заголовок содержит явные TG/бот-индикаторы ("бот", "тг", "telegram", "max", "ботов") — это TG-секция (tg_main), даже если в заголовке упоминается "1 клик", "с 1 кликом", "без 1 клика". Примеры TG-секций: "Сообщение для ботов ТГ и Макс с 1 кликом", "Сообщение для ботов ТГ и Макс без 1 клика" → tg_main.
 
-Примеры заголовков → email_gc: "Почта (1 клик)", "Email (1 клик)", "В 1 клик", "Контент письма (1 клик)"
-Также в email_gc идут секции с заголовками: "контент письма", "текст письма", "почта:", "e-mail:", "письмо:", "для почты", "email:"
+Примеры заголовков → email_gc: "Почта (1 клик)", "Email (1 клик)", "Емейл (1 клик)", "В 1 клик", "Контент письма (1 клик)"
+Также в email_gc идут секции с заголовками: "контент письма", "текст письма", "почта:", "e-mail:", "письмо:", "для почты", "email:", "емейл:", "емаил:", "емайл:", "имейл:" (все варианты написания "email" кириллицей)
 
 Эта секция содержит переменные {first_name}, {offer_url_...} и т.п. — сохранять нетронутыми.
 
@@ -1028,7 +1028,10 @@ def is_section_header(tag, ai_hints=None):
     # Must run BEFORE the length guard below, since merged paragraphs are long
     # (mirrors the TG version above — this used to run after the guard and never
     # matched when Google Docs glued a Тема:/preview line onto the same paragraph).
-    if _first_word_alpha in {'почта', 'письмо'} and text != _first_word_alpha:
+    # 'email'/'емейл'/'емаил'/'емайл'/'имейл' added alongside 'почта'/'письмо' — all
+    # are cyrillic/latin spellings producers actually use for this same label (2026-09-25).
+    if (_first_word_alpha in {'почта', 'письмо', 'email', 'емейл', 'емаил', 'емайл', 'имейл'}
+            and text != _first_word_alpha):
         return 'email_section'
 
     # Merged "Другие источники: ..." header — phrase-based label (multi-word, so it
@@ -1070,10 +1073,12 @@ def is_section_header(tag, ai_hints=None):
     # markers include an opening paren, which essentially never appears in ordinary
     # body sentences, so a plain substring search is safe even on long glued text.
     # Must run BEFORE the length guard for the same reason as the checks above.
-    header_paren_kw = ['почта (', 'тг (', 'телеграм (', 'telegram (']
-    for kw in header_paren_kw:
-        if kw in text:
-            return 'tg_section' if kw != 'почта (' else 'email_section'
+    email_header_paren_kw = ['почта (', 'email (', 'емейл (', 'емаил (', 'емайл (', 'имейл (']
+    tg_header_paren_kw = ['тг (', 'телеграм (', 'telegram (']
+    if any(kw in text for kw in email_header_paren_kw):
+        return 'email_section'
+    if any(kw in text for kw in tg_header_paren_kw):
+        return 'tg_section'
 
     # Section headers are short labels, not body sentences
     if len(text) > 120:
@@ -1088,6 +1093,9 @@ def is_section_header(tag, ai_hints=None):
     email_kw = ['контент письма', 'текст письма', 'текст:', 'текст для почты',
                 'почта:', 'почта (', '3.контент', '3. контент', 'e-mail:', 'письмо:',
                 'для почты', 'email:', 'email от кого', 'email (гк',
+                # Cyrillic spellings of "email" producers actually use (2026-09-25)
+                'емейл:', 'емаил:', 'емайл:', 'имейл:', 'для емейл', 'для имейл',
+                'емейл от кого', 'имейл от кого',
                 # Group separators: start a new email variant (and later TG variant within them)
                 # "Другие источники" contains Unisender email + Voronki TG content
                 'другие источники', 'другие каналы', 'другой источник', 'другие боты',
@@ -1104,7 +1112,9 @@ def is_section_header(tag, ai_hints=None):
     tg_only_kw = ['телеграм:', 'telegram:']
 
     # Standalone email section headers — exact match
-    email_exact = {'почта', 'письмо', 'e-mail', 'email', 'почта гк', 'email гк', 'почта (гк)', 'mail'}
+    email_exact = {'почта', 'письмо', 'e-mail', 'email', 'почта гк', 'email гк', 'почта (гк)', 'mail',
+                   # Cyrillic spellings of "email" producers actually use (2026-09-25)
+                   'емейл', 'емаил', 'емайл', 'имейл', 'емейл гк', 'имейл гк'}
     if text in email_exact:
         return 'email_section'
 
@@ -2179,8 +2189,13 @@ def parse_doc_html(html_content, ai_hints=None):
                         child_lower = child_text.lower()
                         is_numbered_heading = bool(re.match(r'^\d+[.)]\s', child_lower))
                         is_known_label = (
-                            child_lower in ('почта', 'письмо')
-                            or child_lower.startswith(('почта ', 'почта(', 'письмо ', 'письмо('))
+                            # Cyrillic spellings of "email" producers actually use (2026-09-25)
+                            child_lower in ('почта', 'письмо', 'email', 'емейл', 'емаил', 'емайл', 'имейл')
+                            or child_lower.startswith((
+                                'почта ', 'почта(', 'письмо ', 'письмо(',
+                                'email ', 'email(', 'емейл ', 'емейл(',
+                                'емаил ', 'емаил(', 'емайл ', 'емайл(', 'имейл ', 'имейл(',
+                            ))
                             or any(child_lower.startswith(kw) for kw in OTHER_SRC_LABEL_KW)
                         )
                         if is_numbered_heading or is_known_label:

@@ -464,6 +464,26 @@ def _check_bug45(mod_):
 custom_case('bug45', 'Double <br><br> inside one <span> must survive as a real paragraph gap in generate_tg_bots, not collapse to one <br>',
     _check_bug45)
 
+# --- #46: producers started spelling "email" as cyrillic transliterations
+# ("ЕМЕЙЛ"/"ЕМАИЛ"/"ЕМАЙЛ"/"ИМЕЙЛ") instead of "Почта"/"Email" — none of these
+# were in any of the three label-word sets is_section_header checks (merged
+# first-word set, header_paren_kw, email_exact), so such a doc's email section
+# was never opened at all. ---
+header_case('bug46a', 'Standalone "ЕМЕЙЛ" recognized as email_section', '<p>ЕМЕЙЛ</p>', 'email_section')
+header_case('bug46b', 'Standalone "ИМЕЙЛ" recognized as email_section', '<p>ИМЕЙЛ</p>', 'email_section')
+header_case('bug46c', '"ЕМЕЙЛ (1 клик)" paren-style header recognized as email_section',
+            '<p>ЕМЕЙЛ (1 клик)</p>', 'email_section')
+
+def _check_bug46d(parsed):
+    email_html = parsed.get('email_html') or ''
+    leaked = 'от кого' in email_html.lower()
+    return (bool(email_html) and not leaked, f'email_html empty or "от кого" leaked: {email_html!r}')
+
+parse_case('bug46d', '"Емейл От кого: Имя" merged header opens email section (mirrors bug14 for cyrillic spelling)',
+    '<p>Емейл От кого: Кирилл Пшинник</p>'
+    '<p>Первый абзац письма про распродажу.</p>',
+    _check_bug46d)
+
 
 def run():
     passed, failed = 0, 0
