@@ -17,8 +17,66 @@ load_dotenv()
 # Yandex Cloud Storage — загрузка base64-картинок из Google Docs
 # ---------------------------------------------------------------------------
 
-def _upload_image_to_yc(data_uri: str):
-    """Upload base64 data URI image to Yandex Cloud Storage.
+# Images heavier than this get resized/recompressed before upload — Google Docs
+# frequently embeds screenshots at native resolution (e.g. 2048px wide) even when
+# they're displayed at a fraction of that size, which bloats parse/generate payloads
+# and can hit the html.parser attribute-length issue _replace_base64_images_with_yc_urls
+# used to have. Images under this size are left untouched (no point, no risk of mushiness).
+_IMG_COMPRESS_THRESHOLD = 500_000  # bytes
+
+
+def _maybe_compress_image(img_bytes: bytes, content_type: str, target_width_px=None):
+    """Resize+recompress an image if it's heavier than _IMG_COMPRESS_THRESHOLD.
+    Targets 2x the doc's displayed width (retina-sharp, not mushy) when known,
+    otherwise caps at 1600px. Returns (bytes, content_type) — original values
+    unchanged if compression isn't needed, fails, or doesn't actually shrink it."""
+    if len(img_bytes) <= _IMG_COMPRESS_THRESHOLD:
+        return img_bytes, content_type
+    try:
+        from PIL import Image
+        import io
+
+        im = Image.open(io.BytesIO(img_bytes))
+        im.load()
+        orig_w, orig_h = im.size
+
+        if target_width_px:
+            max_w = min(orig_w, max(int(target_width_px * 2), 800))
+        else:
+            max_w = min(orig_w, 1600)
+        if max_w < orig_w:
+            ratio = max_w / orig_w
+            im = im.resize((max_w, max(1, round(orig_h * ratio))), Image.LANCZOS)
+
+        # Google Docs exports frequently tag opaque screenshots as RGBA anyway — only
+        # treat it as "has transparency" if the alpha channel actually varies.
+        has_alpha = False
+        if im.mode in ('RGBA', 'LA'):
+            has_alpha = im.getchannel('A').getextrema() != (255, 255)
+        elif im.mode == 'P' and 'transparency' in im.info:
+            has_alpha = True
+        buf = io.BytesIO()
+        if has_alpha:
+            im.save(buf, format='PNG', optimize=True)
+            new_content_type = 'image/png'
+        else:
+            im.convert('RGB').save(buf, format='JPEG', quality=88, optimize=True)
+            new_content_type = 'image/jpeg'
+        new_bytes = buf.getvalue()
+
+        if len(new_bytes) < len(img_bytes):
+            logging.info(f'[Image Compress] {len(img_bytes)} → {len(new_bytes)} bytes '
+                         f'({orig_w}x{orig_h} → {im.size[0]}x{im.size[1]})')
+            return new_bytes, new_content_type
+        return img_bytes, content_type
+    except Exception as e:
+        logging.warning(f'[Image Compress] failed, uploading original: {e}')
+        return img_bytes, content_type
+
+
+def _upload_image_to_yc(data_uri: str, target_width_px=None):
+    """Upload base64 data URI image to Yandex Cloud Storage, compressing it first if
+    it's unusually heavy (see _maybe_compress_image).
     Returns public URL string on success, None on failure or missing credentials."""
     import base64, hashlib, boto3
     from botocore.client import Config
@@ -40,9 +98,11 @@ def _upload_image_to_yc(data_uri: str):
     try:
         header, b64data = data_uri.split(',', 1)
         content_type = header.split(':')[1].split(';')[0]  # data:image/png;base64 → image/png
-        ext = content_type.split('/')[1]  # png, jpeg, gif, webp
 
         img_bytes = base64.b64decode(b64data)
+        img_bytes, content_type = _maybe_compress_image(img_bytes, content_type, target_width_px)
+        ext = content_type.split('/')[1]  # png, jpeg, gif, webp
+
         # Stable filename: same content → same URL, no duplicates in bucket
         img_hash = hashlib.md5(img_bytes).hexdigest()[:12]
         filename = f'gdoc-images/{img_hash}.{ext}'
@@ -82,6 +142,11 @@ def _upload_image_to_yc(data_uri: str):
         return None
 
 
+_IMG_TAG_RE = re.compile(r'<img\b[^>]*>', re.IGNORECASE)
+_IMG_SRC_RE = re.compile(r'src="(data:image/[^"]+)"')
+_IMG_WIDTH_RE = re.compile(r'width:\s*([\d.]+)px')
+
+
 def _replace_base64_images_with_yc_urls(html):
     """Replace <img src="data:image/...;base64,..."> with an uploaded YC URL.
     Runs at parse time so the huge base64 payload never has to round-trip
@@ -90,19 +155,29 @@ def _replace_base64_images_with_yc_urls(html):
     10+ MB and get rejected by the proxy's request body size limit.
     Falls back to leaving the data URI untouched if upload fails (e.g. no
     YC credentials) — the existing generate-time upload/fallback logic
-    still handles that case."""
+    still handles that case.
+
+    Works on the raw HTML string via regex rather than re-parsing with
+    BeautifulSoup('html.parser') — that parser silently mishandles very long
+    attribute values (10+ million chars for an uncompressed screenshot) and
+    would drop the src instead of finding it, so the image never got uploaded
+    at all for anything much heavier than ~5MB of base64."""
     if not html or 'data:image' not in html:
         return html
-    soup = BeautifulSoup(html, 'html.parser')
-    changed = False
-    for img in soup.find_all('img'):
-        src = img.get('src', '')
-        if src.startswith('data:image'):
-            yc_url = _upload_image_to_yc(src)
-            if yc_url:
-                img['src'] = yc_url
-                changed = True
-    return str(soup) if changed else html
+
+    def _repl(m):
+        tag = m.group(0)
+        src_m = _IMG_SRC_RE.search(tag)
+        if not src_m:
+            return tag
+        width_m = _IMG_WIDTH_RE.search(tag)
+        target_width = float(width_m.group(1)) if width_m else None
+        yc_url = _upload_image_to_yc(src_m.group(1), target_width_px=target_width)
+        if not yc_url:
+            return tag
+        return tag[:src_m.start()] + f'src="{yc_url}"' + tag[src_m.end():]
+
+    return _IMG_TAG_RE.sub(_repl, html)
 
 logging.basicConfig(
     filename='debug.log',
@@ -4703,6 +4778,13 @@ def api_parse():
     except requests.RequestException as e:
         return jsonify({'error': f'Ошибка загрузки документа: {str(e)}'}), 502
 
+    # Replace base64 screenshots with YC URLs on the RAW export, before any BeautifulSoup
+    # parsing happens — lxml (used below and inside parse_with_ai) doesn't handle
+    # multi-megabyte single attribute values reliably on every platform (confirmed to
+    # silently corrupt the src on some lxml/libxml2 builds), so this has to run first
+    # rather than after parse_doc_html hands back html already damaged by that parse.
+    html_content = _replace_base64_images_with_yc_urls(html_content)
+
     # Run AI parser first to get section header hints for the HTML parser
     ai_result = None
     ai_error = None
@@ -4930,6 +5012,13 @@ def api_generate():
             if src:
                 try:
                     result[ch_key] = generate_tg_html(src, ch_key, campaign, date, segment)
+                    # generate_tg_html only pulls text out of headings/paragraphs/lists — any
+                    # <img> in the doc's bot section gets silently dropped (Telegram/Max don't
+                    # render <img> in text anyway). Grab its URL separately so the GC-push step
+                    # can attach it as a real file through GC's own "Изображение" uploader.
+                    img_m = re.search(r'<img[^>]+src="([^"]+)"', src)
+                    if img_m and not img_m.group(1).startswith('data:image'):
+                        result[f'{ch_key}_image_url'] = img_m.group(1)
                 except Exception as e:
                     result[ch_key] = f'<!-- Error: {e} -->'
 
@@ -5174,7 +5263,44 @@ def _gc_login_session():
         logging.warning(f'[GC Login] {e}')
     return None, None
 
-def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender_name=None, tags=None):
+def _gc_attach_image_via_playwright(page, image_url):
+    """Attach an image (already hosted on YC) to the current GC mailing draft through
+    GC's own "Изображение" uploader — Telegram/Max messages don't render <img> in the
+    text body, a photo has to be a real file attachment. Downloads the image locally
+    first since Playwright's file chooser needs a path, not a URL.
+    Verified selectors (2026-10-04, live GC ticket mailing editor):
+      #btn-add-photo            → opens the attach-media panel
+      .folder-action-upload     → triggers the native file chooser
+      .files-list .file-item img (first one — newest, sorted by date added) → select it
+    Raises on failure — caller decides whether a failed attach should fail the whole push."""
+    import tempfile
+
+    resp = requests.get(image_url, timeout=30)
+    resp.raise_for_status()
+    suffix = os.path.splitext(urlparse(image_url).path)[1] or '.png'
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(resp.content)
+        tmp_path = tmp.name
+
+    try:
+        page.click('#btn-add-photo')
+        page.wait_for_selector('.folder-action-upload', state='visible', timeout=10000)
+        with page.expect_file_chooser() as fc_info:
+            page.click('.folder-action-upload')
+        fc_info.value.set_files(tmp_path)
+        # Upload + thumbnail render takes a moment; poll instead of a flat sleep.
+        page.wait_for_selector('.files-list .file-item img', state='visible', timeout=45000)
+        page.wait_for_timeout(1500)  # let the just-uploaded file settle into place (newest-first sort)
+        page.locator('.files-list .file-item img').first.click()
+        page.wait_for_timeout(500)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender_name=None, tags=None, image_url=None, preheader=None):
     """Create a GC mailing draft end-to-end via our own Playwright session:
     open the "new mailing" form, fill name/category/transport, submit to get an id,
     then set the HTML body (and transport-specific fields) on the resulting draft."""
@@ -5215,8 +5341,15 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
         ctx.add_cookies(pw_cookies)
         page = ctx.new_page()
         try:
-            page.goto(f'{gc_url_base}/notifications/control/mailings/new', timeout=30000)
-            page.wait_for_load_state('networkidle', timeout=20000)
+            # wait_until='load' waits for every subresource — including the page's own
+            # pile of third-party trackers (Yandex Metrika, mail.ru privacy, etc.), each
+            # needing its own on-the-fly TLS cert from the MITM proxy. That routinely blows
+            # past 30s. 'domcontentloaded' is enough to start filling the form.
+            # Also avoid 'networkidle' anywhere on this page: Yandex Metrika keeps a
+            # persistent WebSocket (mc.yandex.com/solid.ws) chattering the whole time,
+            # so the network never actually goes idle and that wait just times out.
+            page.goto(f'{gc_url_base}/notifications/control/mailings/new', wait_until='domcontentloaded', timeout=45000)
+            page.wait_for_selector('#Mailing_title', state='visible', timeout=45000)
 
             page.fill('#Mailing_title', name)
             if sender_name:
@@ -5235,7 +5368,7 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
             page.wait_for_timeout(500)
 
             page.get_by_role('button', name='Создать рассылку').click()
-            page.wait_for_load_state('networkidle', timeout=20000)
+            page.wait_for_url(re.compile(r'/mailings/update/id/\d+'), timeout=45000)
 
             m = re.search(r'/mailings/update/id/(\d+)', page.url)
             if not m:
@@ -5282,9 +5415,19 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
                     "if (window.jQuery) { jQuery('#mailing_bot_id').val('0').trigger('change'); }"
                 )
                 page.wait_for_timeout(500)
+
+                if image_url:
+                    try:
+                        _gc_attach_image_via_playwright(page, image_url)
+                    except Exception as e:
+                        # Non-fatal — the mailing itself still saves fine without the photo,
+                        # matching the previous behaviour (image just didn't make it).
+                        logging.warning(f'[GC PW Create] job={job_id} image attach failed: {e}')
             elif transport == 'email':
                 page.wait_for_selector('#Mailing_subject', timeout=10000)
                 page.fill('#Mailing_subject', subject)
+                if preheader:
+                    page.fill('#Mailing_preHeader', preheader)
                 # Click "Сегмент" radio — recipients_type=segment
                 page.wait_for_selector('#ParamsObject_recipients_type_2', timeout=10000)
                 page.click('#ParamsObject_recipients_type_2')
@@ -5297,12 +5440,26 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
             # Click the real save button (.btn-save-mailing) so GC's submit event handlers
             # (e.g. Select2 serialisation) run — form#yw0.submit() bypasses them.
             page.click('.btn-save-mailing')
-            page.wait_for_load_state('networkidle', timeout=20000)
+            page.wait_for_load_state('load', timeout=45000)
 
             logging.info(f'[GC PW Create] mailing={mailing_id} transport={transport} name={name!r} saved OK')
             _jobs_write(job_id, status='done', gc_url=gc_url, mailing_id=mailing_id)
         except Exception as e:
             logging.warning(f'[GC PW Create] job={job_id} transport={transport}: {e}')
+            # Capture what the browser actually saw at the moment of failure — timeouts on
+            # this page have repeatedly turned out to have different causes each time
+            # (proxy MITM overhead, networkidle on a chattery page, stale proxy process...),
+            # and guessing from timing numbers alone kept missing. A screenshot + HTML dump
+            # answers it directly instead of needing another live debugging round.
+            try:
+                os.makedirs('gc_output/diagnostics', exist_ok=True)
+                page.screenshot(path=f'gc_output/diagnostics/{job_id}.png')
+                with open(f'gc_output/diagnostics/{job_id}.html', 'w', encoding='utf-8') as f:
+                    f.write(page.content())
+                logging.warning(f'[GC PW Create] job={job_id} diagnostics saved: '
+                               f'gc_output/diagnostics/{job_id}.png/.html, url={page.url}')
+            except Exception as diag_e:
+                logging.warning(f'[GC PW Create] job={job_id} diagnostics capture failed: {diag_e}')
             _jobs_write(job_id, status='error', error=str(e))
         finally:
             browser.close()
@@ -5366,6 +5523,8 @@ def api_push_to_mail():
     channel_key = data.get('channel_key', 'email')
     sender_name = data.get('sender_name', '').strip() or 'Университет Зерокодер'
     campaign = data.get('campaign', '').strip()
+    image_url = (data.get('image_url') or '').strip() or None
+    preheader = (data.get('preheader') or '').strip() or None
 
     if not name or not html:
         return jsonify({'error': 'Нужны name и html'}), 400
@@ -5377,10 +5536,10 @@ def api_push_to_mail():
     job_id = uuid.uuid4().hex[:12]
     _jobs_write(job_id, status='creating', error=None, gc_url=None)
 
-    logging.info(f"push-to-mail: name={name!r} html_len={len(html)} html_snippet={html[:120]!r} transport={transport} tags={mailing_tags}")
+    logging.info(f"push-to-mail: name={name!r} html_len={len(html)} html_snippet={html[:120]!r} transport={transport} tags={mailing_tags} image_url={image_url!r} preheader={preheader!r}")
     threading.Thread(
         target=_gc_create_mailing_playwright,
-        args=(job_id, name, subject, html, transport, sender_name, mailing_tags),
+        args=(job_id, name, subject, html, transport, sender_name, mailing_tags, image_url, preheader),
         daemon=True,
     ).start()
 

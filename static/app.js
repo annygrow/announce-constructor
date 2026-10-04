@@ -1272,6 +1272,7 @@ async function confirmPushToMail(channelKey) {
         date_tag: date ? `web-${date}` : '',
         campaign: document.getElementById('utmCampaign')?.value.trim() || '',
         preheader, sender_name: senderName,
+        image_url: generatedOutputs[`${channelKey}_image_url`] || '',
       }),
     });
     if (resp.status === 401) { window.location.href = '/login'; return; }
