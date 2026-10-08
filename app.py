@@ -5423,6 +5423,28 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
                         # Non-fatal — the mailing itself still saves fine without the photo,
                         # matching the previous behaviour (image just didn't make it).
                         logging.warning(f'[GC PW Create] job={job_id} image attach failed: {e}')
+
+                # Save the main tab first — content/bot/tags/image above are only local
+                # DOM state until this submits; navigating to the Настройки tab next
+                # would otherwise lose them.
+                page.click('.btn-save-mailing')
+                page.wait_for_load_state('load', timeout=45000)
+
+                # Настройки tab (click/auth link wrapping, link preview) is a separate
+                # server-rendered page (part/settings) with its own form. A fresh draft
+                # does NOT reliably default these to checked, so set them explicitly —
+                # otherwise GC can ship messages with raw unwrapped links and visible
+                # link previews.
+                page.goto(f'{gc_url}/part/settings', wait_until='domcontentloaded', timeout=45000)
+                page.wait_for_selector('#ParamsObject_click_wrap_links', state='attached', timeout=10000)
+                page.evaluate(
+                    "['ParamsObject_click_wrap_links', 'ParamsObject_wrap_links', "
+                    "'ParamsObject_disable_links_preview'].forEach(id => { "
+                    "const el = document.getElementById(id); if (el && !el.checked) el.click(); });"
+                )
+                page.wait_for_timeout(300)
+                page.click('.btn-save-mailing')
+                page.wait_for_load_state('load', timeout=45000)
             elif transport == 'email':
                 page.wait_for_selector('#Mailing_subject', timeout=10000)
                 page.fill('#Mailing_subject', subject)
@@ -5437,10 +5459,10 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
                 page.click('#ParamsObject_send_to_0')
                 page.wait_for_timeout(500)
 
-            # Click the real save button (.btn-save-mailing) so GC's submit event handlers
-            # (e.g. Select2 serialisation) run — form#yw0.submit() bypasses them.
-            page.click('.btn-save-mailing')
-            page.wait_for_load_state('load', timeout=45000)
+                # Click the real save button (.btn-save-mailing) so GC's submit event
+                # handlers (e.g. Select2 serialisation) run — form#yw0.submit() bypasses them.
+                page.click('.btn-save-mailing')
+                page.wait_for_load_state('load', timeout=45000)
 
             logging.info(f'[GC PW Create] mailing={mailing_id} transport={transport} name={name!r} saved OK')
             _jobs_write(job_id, status='done', gc_url=gc_url, mailing_id=mailing_id)
