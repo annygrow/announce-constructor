@@ -1298,9 +1298,29 @@ def normalize_br_lines(tag_copy):
                 i += 1
         segments.append((''.join(current_text_parts), 0))
         new_children = []
+        pending_brs = 0
         for line_text, br_count in segments:
             if not line_text.strip():
+                # An empty segment still carries real <br> information — either
+                # a leading blank-line artifact before the first real line, or
+                # (when every segment is empty) a pure <br>-only spacer span
+                # with no text at all. Don't drop it: carry the count forward
+                # as bare, unwrapped <br> siblings instead of folding it into
+                # a text clone. A bare <br> direct child is already a group
+                # boundary that _consume_leading_meta/_split_merged_label_tag
+                # recognize explicitly (see their own child.find('br') handling)
+                # and is a no-op for label+value merging — it just becomes its
+                # own empty, silently-discarded group, so "Прехедер: " in the
+                # NEXT clone still carries zero breaks of its own and merges
+                # forward with its value exactly as before (bug #44/#45). But
+                # it keeps the break alive for any consumer that isn't doing
+                # label extraction — e.g. clean_tag_for_tg's final <br> -> '\n'
+                # conversion — instead of silently vanishing (bug #49).
+                pending_brs += br_count
                 continue
+            for _ in range(pending_brs):
+                new_children.append(BeautifulSoup('<br>', 'lxml').br)
+            pending_brs = 0
             clone = BeautifulSoup(f'<{child.name}></{child.name}>', 'lxml').find(child.name)
             for attr, val in child.attrs.items():
                 clone[attr] = val
@@ -1308,6 +1328,8 @@ def normalize_br_lines(tag_copy):
             for _ in range(br_count):
                 clone.append(BeautifulSoup('<br>', 'lxml').br)
             new_children.append(clone)
+        for _ in range(pending_brs):
+            new_children.append(BeautifulSoup('<br>', 'lxml').br)
         # Always rebuild once we've reached here (this child is guaranteed to
         # contain at least one <br>, per the continue-guard above) — even a
         # single surviving line needs rebuilding when a leading/trailing blank
@@ -1604,22 +1626,38 @@ def extract_footnotes(soup):
 
 
 def _find_earlier_matching_spans(tag):
-    """Find earlier siblings (within the same parent) that share tag's exact
-    tag name + class list — the Google Docs "repeated CTA line" pattern where
-    a producer pastes the same "<label> 👉 <placeholder>" line 2-3x in a row
+    """Find earlier siblings (within the same parent) that are a LITERAL repeat
+    of tag's own text — the Google Docs "repeated CTA line" pattern where a
+    producer pastes the same "<label> 👉 <placeholder>" line 2-3x in a row
     (separated by <br/>) for visual emphasis, but only comments the LAST
-    occurrence. An identically-classed span earlier in the same paragraph is
-    unambiguously the same "insert link here" placeholder repeated, so it
-    should get the same href too — not just the occurrence nearest the
-    trailing comment marker. Already-linked spans are skipped."""
+    occurrence. Matching requires both the same class AND the same visible
+    text, and only looks back up to 3 line breaks — otherwise, in a paragraph
+    where many unrelated bold phrases happen to share the same Google Docs
+    auto-generated style class, this would wrap all of them in the link
+    instead of just the genuinely repeated line. Already-linked spans are
+    skipped."""
     matches = []
     target_classes = set(tag.get('class', []) or [])
+    target_text = re.sub(r'\s+', ' ', tag.get_text()).strip()
+    if not target_text:
+        return matches
     cursor = tag.previous_sibling
-    while cursor is not None:
-        if hasattr(cursor, 'name') and cursor.name == tag.name:
-            cursor_classes = set(cursor.get('class', []) or [])
-            if cursor_classes == target_classes and not cursor.find_parent('a'):
-                matches.append(cursor)
+    line_breaks_seen = 0
+    while cursor is not None and line_breaks_seen < 3:
+        if hasattr(cursor, 'name'):
+            # Google Docs frequently wraps a line-break <br/> in its own
+            # <span><br/></span> rather than emitting a bare <br> sibling —
+            # count those as line breaks too, not as a tag-name mismatch.
+            if cursor.name == 'br':
+                line_breaks_seen += 1
+            elif not cursor.get_text(strip=True) and cursor.find('br'):
+                line_breaks_seen += len(cursor.find_all('br'))
+            elif cursor.name == tag.name:
+                cursor_classes = set(cursor.get('class', []) or [])
+                cursor_text = re.sub(r'\s+', ' ', cursor.get_text()).strip()
+                if (cursor_classes == target_classes and cursor_text == target_text
+                        and not cursor.find_parent('a')):
+                    matches.append(cursor)
         cursor = cursor.previous_sibling
     return matches
 
@@ -1994,6 +2032,31 @@ def fix_orphan_sups(body):
             prev.append(sup)
 
 
+_META_LABEL_PREFIX_RE = re.compile(
+    r'^\s*(?:тема(?:\s+письма)?|прехедер|прехендер|прехэдер|превью|preview|preheader|subject)\s*:\s*',
+    re.IGNORECASE
+)
+
+
+def _strip_leading_meta_label(tag_copy):
+    """Remove just the 'Тема:'/'Прехедер:' LABEL word from the very start of
+    tag_copy's text, keeping the VALUE that follows it as visible content.
+    Used for TG/bot channels: unlike email (which has its own separate
+    subject/preheader UI field in GC and so drops the whole label+value line
+    from the body), a bot has exactly one text field — the value the
+    producer wrote after "Тема:" must still show up in the message, only the
+    bare label word itself is the throwaway authoring convention.
+    Only strips from the first non-empty descendant text node — doesn't
+    attempt to handle a label split mid-word across multiple sibling spans
+    (not observed in practice for this specific label pattern)."""
+    for node in tag_copy.descendants:
+        if isinstance(node, NavigableString) and str(node).strip():
+            new_text = _META_LABEL_PREFIX_RE.sub('', str(node), count=1)
+            if new_text != str(node):
+                node.replace_with(NavigableString(new_text))
+            break
+
+
 def parse_doc_html(html_content, ai_hints=None):
     """
     Parse Google Docs exported HTML and return structured content dict:
@@ -2363,6 +2426,23 @@ def parse_doc_html(html_content, ai_hints=None):
                         tg_subsections[-1]['blocks'].append(tag_copy)
             return
         if section_type in ('subject', 'preview'):
+            # Тема:/Прехедер: are metadata ONLY for email — GC gives email a separate
+            # subject/preheader field, so stripping the label line out of the body
+            # is correct there. Bots/TG have exactly one text field; whatever the
+            # producer wrote (including a "Тема: ..." line) must stay as visible
+            # message text, not be silently cut. Run the extractor on a disposable
+            # copy purely for its side effect (so email still gets a usable subject
+            # if this document has no separate email instance of its own), but
+            # route the ORIGINAL, unstripped tag into the TG section.
+            if current_section == 'tg_section':
+                probe_copy = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                if probe_copy:
+                    _consume_leading_meta(probe_copy)
+                stripped_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                if stripped_tag:
+                    _strip_leading_meta_label(stripped_tag)
+                _route(stripped_tag if stripped_tag is not None else tag)
+                return
             # _consume_leading_meta() extracts subject/preview itself from whichever
             # leading groups match Тема:/Прехедер: — handles both the plain single-line
             # case and Google Docs gluing extra real content onto the same paragraph via
@@ -2384,6 +2464,28 @@ def parse_doc_html(html_content, ai_hints=None):
         # Normalize "тема :" → "тема:" to handle span-split formatting artifacts.
         txt = get_text_content(tag).strip()
         txt_lower = re.sub(r'\s+:', ':', txt.lower())
+        # Тема:/Прехедер: are email-only metadata (see comment on the merged-paragraph
+        # branch above) — in a TG/bot section this single-line form must stay visible
+        # text too. Opportunistically capture the value for email's fallback use
+        # without removing anything or skipping _route(tag) below.
+        if current_section == 'tg_section':
+            if not subject:
+                for kw in ['тема письма:', 'тема:', 'темы:', 'subject:']:
+                    if txt_lower.startswith(kw):
+                        raw0 = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+                        subject = re.sub(r'^[^:]+\s*:\s*', '', raw0, count=1).strip()
+                        break
+            if not preview:
+                for kw in ['превью:', 'прехедер:', 'preview:', 'preheader:']:
+                    if txt_lower.startswith(kw):
+                        raw0 = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+                        preview = re.sub(r'^[^:]+\s*:\s*', '', raw0, count=1).strip()
+                        break
+            stripped_tag = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+            if stripped_tag:
+                _strip_leading_meta_label(stripped_tag)
+            _route(stripped_tag if stripped_tag is not None else tag)
+            return
         # Always consume subject-keyword paragraphs — even if subject is already set —
         # so they never bleed into the email body as visible content.
         for kw in ['тема письма:', 'тема:', 'темы:', 'subject:']:
@@ -2538,7 +2640,14 @@ def parse_doc_html(html_content, ai_hints=None):
     #   Format 2 (positional): list items = ["campaign-slug", "dd.mm", "HH:MM"]
     from datetime import datetime as _dt
     def _norm_date(raw):
-        raw = re.sub(r'\s*\.\s*', '.', raw.strip())
+        # Google Docs sometimes splits a date string across spans for styling
+        # reasons (same artifact as the {first_name} span-split, bug #21) —
+        # e.g. "22.10" exported as <span>2</span><span>2.10</span>. get_text_content()
+        # joins span text with a literal space, so the date arrives as "2 2.10"
+        # instead of "22.10". Collapse whitespace strictly between two digits
+        # before matching (not all whitespace — "22.10 (четверг)" must survive).
+        raw = re.sub(r'(?<=\d)\s+(?=\d)', '', raw.strip())
+        raw = re.sub(r'\s*\.\s*', '.', raw)
         dm = re.match(r'^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?', raw)
         if dm:
             day = f'{int(dm.group(1)):02d}'
@@ -2592,8 +2701,11 @@ def parse_doc_html(html_content, ai_hints=None):
                 continue
             if re.match(r'^\d{1,2}:\d{2}$', item):  # time like "08:00" — skip
                 continue
-            if re.match(r'^\d{1,2}\s*\.\s*\d{1,2}', item) and not doc_date:
-                doc_date = _norm_date(item)
+            # Collapse a possible Google Docs span-split space between digits
+            # (see _norm_date comment) before testing the shape of this item.
+            item_compact = re.sub(r'(?<=\d)\s+(?=\d)', '', item)
+            if re.match(r'^\d{1,2}\s*\.\s*\d{1,2}', item_compact) and not doc_date:
+                doc_date = _norm_date(item_compact)
             elif not doc_campaign and re.match(r'^[a-zA-Zа-яА-ЯёЁ][a-zA-Zа-яА-ЯёЁ0-9\-_.]*$', item):
                 doc_campaign = item
 
@@ -2602,7 +2714,8 @@ def parse_doc_html(html_content, ai_hints=None):
         for item in p_items:
             if not item or re.match(r'^\d{1,2}:\d{2}$', item):
                 continue
-            dm = re.search(r'(?<![.\d])(\d{1,2}\.\d{1,2})(?![.\d])', item)
+            item_compact = re.sub(r'(?<=\d)\s+(?=\d)', '', item)
+            dm = re.search(r'(?<![.\d])(\d{1,2}\.\d{1,2})(?![.\d])', item_compact)
             if dm:
                 day_str, mon_str = dm.group(1).split('.')
                 if 1 <= int(day_str) <= 31 and 1 <= int(mon_str) <= 12:

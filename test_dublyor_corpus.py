@@ -484,6 +484,93 @@ parse_case('bug46d', '"Емейл От кого: Имя" merged header opens ema
     '<p>Первый абзац письма про распродажу.</p>',
     _check_bug46d)
 
+# --- #47: _find_earlier_matching_spans (bug39's fix) over-matched by CSS class
+# alone — in a paragraph where several UNRELATED bold phrases share the same
+# Google-Docs auto-generated style class as the genuinely repeated CTA
+# placeholder, it wrapped ALL of them in the comment's link, not just the
+# literal repeat. Must require same visible text, not just same class.
+def _check_bug47(parsed):
+    tg = parsed.get('tg_html') or ''
+    count = tg.count('<a href="https://example.com/promo">')
+    # The unrelated phrase's text must not appear inside an <a> tag at all.
+    m = re.search(r'<a[^>]*>([^<]*Что соберёшь своими руками[^<]*)</a>', tg)
+    unrelated_linked = bool(m)
+    return (count == 2 and not unrelated_linked,
+            f'expected 2 linked repeats and unrelated phrase NOT linked; count={count} unrelated_linked={unrelated_linked}: {tg!r}')
+
+# --- #48: "Дата отправки: 22.10" date split across spans by Google Docs
+# (styling artifact, same class as bug #21's {first_name} split) — get_text_content
+# joins span text with a literal space separator, so the date arrives as
+# "22 2.10"-shaped text ("2"+"2.10") and _norm_date's regex (anchored, no
+# tolerance for an embedded space) silently fell through to `return raw`,
+# passing the broken date straight into utm_term on every generated link.
+def _check_bug48(parsed):
+    got = parsed.get('doc_date')
+    ok = got == '22.10.26'
+    return (ok, f'doc_date: got {got!r}, expected \'22.10.26\'')
+
+parse_case('bug48', 'Date split across spans ("Дата отправки: 2" + "2.10") must still normalize to 22.10.26',
+    '<p>Тег активности: vibe-code-intensive-3.0</p>'
+    '<p><span>Дата отправки: 2</span><span>2.10</span></p>'
+    '<p>Телеграм</p>'
+    '<p>контент</p>',
+    _check_bug48)
+
+# --- #49: normalize_br_lines() silently dropped a LEADING <br> (or an
+# entirely <br>-only spacer span) anywhere in a merged paragraph, not just
+# near the label it was designed for — collateral damage from being applied
+# tag_copy-wide inside _consume_leading_meta/_split_merged_label_tag. A
+# comment-resolved CTA mid-paragraph ("👉 ссылка" followed by
+# "<span><br/>next sentence...</span>") lost its line break entirely, gluing
+# the CTA straight onto the following sentence with zero separator.
+def _check_bug49(parsed):
+    tg = parsed.get('tg_html') or ''
+    br_preserved = bool(re.search(r'</a>\s*<span>\s*<br\s*/?>\s*Текст после кнопки', tg))
+    return (br_preserved, f'br_preserved={br_preserved}: {tg!r}')
+
+parse_case('bug49', 'Leading <br/> on a comment-ref CTA\'s following span must survive',
+    '<p>Телеграм</p>'
+    '<p><span>ЗАБРАТЬ МЕСТО </span><span>👉 ссылка </span>'
+    '<sup><a href="#cmnt1" id="cmnt_ref1">[a]</a></sup><span><br/>Текст после кнопки.</span></p>'
+    '<div class="footnote"><p><a href="#cmnt_ref1" id="cmnt1">[a]</a><span> https://example.com/promo</span></p></div>',
+    _check_bug49)
+
+# --- #50: Тема:/Прехедер: are email-only metadata — GC gives email a separate
+# subject/preheader UI field, so stripping that label line out of the email
+# body is correct. Bots have exactly ONE text field; a "Тема: ..." line typed
+# at the top of a TG/bot section must stay as VISIBLE message text (it's the
+# only place it can go), not be silently cut out the way it is for email.
+# But the bare LABEL WORD "Тема:" itself is just an authoring convention for
+# the producer/parser, not something subscribers should read — only the
+# VALUE after it ("Тест-драйв", not "Тема: Тест-драйв") must stay in the
+# bot's visible text; email's subject must still populate independently
+# from its own, separate instance elsewhere in the document.
+def _check_bug50(parsed):
+    tg = parsed.get('tg_html') or ''
+    subject = parsed.get('subject') or ''
+    tg_keeps_value_only = ('Тест-драйв' in tg and 'Текст бота.' in tg
+                            and 'тема' not in tg.lower())
+    subject_from_email = subject == 'Тема письма'
+    return (tg_keeps_value_only and subject_from_email,
+            f'tg_keeps_value_only={tg_keeps_value_only} subject={subject!r} (expected \'Тема письма\'): {tg!r}')
+
+parse_case('bug50', 'Тема: stays visible in TG/bot body; email keeps its own independent subject extraction',
+    '<p>4. Контент письма</p>'
+    '<p>Тема: Тема письма</p>'
+    '<p>Текст письма.</p>'
+    '<p>Телеграм</p>'
+    '<p><span>Тема: Тест-драйв<br/><br/></span><span>Текст бота.</span></p>',
+    _check_bug50)
+
+parse_case('bug47', 'Unrelated bold phrase sharing CSS class with repeated CTA placeholder must not get linked',
+    '<p>Телеграм</p>'
+    '<p><span class="c15">Что соберёшь своими руками:</span><span><br/></span>'
+    '<span>Собрать заказ 👉 </span><span class="c15">ссылка</span><span><br/></span>'
+    '<span>Собрать заказ 👉 </span><span class="c15">ссылка</span><span><br/></span>'
+    '<sup><a href="#cmnt1" id="cmnt_ref1">[a]</a></sup></p>'
+    '<div class="footnote"><p><a href="#cmnt_ref1" id="cmnt1">[a]</a><span> https://example.com/promo</span></p></div>',
+    _check_bug47)
+
 
 def run():
     passed, failed = 0, 0
