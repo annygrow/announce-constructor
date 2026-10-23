@@ -1075,6 +1075,45 @@ html, body {
   gap: 4px;
 }
 
+.btn-edit-fields-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.btn-edit-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.btn-edit-row .btn-text-field,
+.btn-edit-row .btn-url-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn-remove-row-btn {
+  flex-shrink: 0;
+}
+
+.btn-add-row-btn {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+
+.btn-add-row-btn:hover {
+  border-color: var(--purple);
+  color: #b89cfa;
+}
+
 .block-edit-input {
   width: 100%;
   padding: 5px 8px;

@@ -621,21 +621,39 @@ def block_blue_text(paragraphs_html, image_url=''):
         + '\n</td></tr>\n</table></td></tr>'
     )
 
-def block_button(btn_url, btn_text, paragraphs_html=''):
-    """Standalone button on white background, centered.
+def block_button(btn_url, btn_text, paragraphs_html='', buttons=None):
+    """Standalone button(s) on white background, centered.
     If paragraphs_html is given (e.g. text that follows the button in the
-    source doc), it's rendered below the button in the SAME white block
-    instead of a separate one."""
+    source doc), it's rendered below the button(s) in the SAME white block
+    instead of a separate one.
+    `buttons` (optional list of {'text','url'} dicts) renders 2+ stacked
+    buttons instead of the single btn_url/btn_text pair — same convention as
+    the other CTA-capable block helpers."""
     btn_style = (
         "background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
         "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
         "font-size:16px;display:inline-block;font-weight:600"
     )
+    btn_list = buttons if buttons else [{'text': btn_text, 'url': btn_url}]
     if paragraphs_html.strip():
+        btns_html = '\n'.join(
+            f'<div align="center" style="padding-bottom:10px"><a href="{b.get("url", "#")}" target="_blank" style="{btn_style}">{b.get("text", "")}</a></div>'
+            for b in btn_list
+        )
         return (
             '<tr><td align="left" bgcolor="#ffffff" style="padding:8px 20px 20px;margin:0;background-color:#ffffff">\n'
-            f'<div align="center" style="padding-bottom:10px"><a href="{btn_url}" target="_blank" style="{btn_style}">{btn_text}</a></div>\n'
+            + btns_html + '\n'
             + paragraphs_html
+            + '\n</td></tr>'
+        )
+    if len(btn_list) > 1:
+        btns_html = '\n'.join(
+            f'<div align="center" style="padding-bottom:10px"><a href="{b.get("url", "#")}" target="_blank" style="{btn_style}">{b.get("text", "")}</a></div>'
+            for b in btn_list
+        )
+        return (
+            '<tr><td align="center" bgcolor="#ffffff" style="padding:8px 20px 20px;background-color:#ffffff">\n'
+            + btns_html
             + '\n</td></tr>'
         )
     return (
@@ -644,18 +662,28 @@ def block_button(btn_url, btn_text, paragraphs_html=''):
         '</td></tr>'
     )
 
-def _insert_button_in_paragraphs(paragraphs_html, btn_position, btn_url, btn_text):
-    """Inserts a centered CTA button among paragraphs at btn_position (count of
-    paragraphs before the button), so white/grey/dotted blocks keep their button
-    INSIDE the same bordered card when switched from block_blue_cta/block_button
-    via the type dropdown, instead of losing it. Falls back to appending after
-    all paragraphs when the original position wasn't recorded."""
+def _insert_button_in_paragraphs(paragraphs_html, btn_position, btn_url, btn_text, buttons=None):
+    """Inserts one or more centered CTA buttons among paragraphs at btn_position
+    (count of paragraphs before the button), so white/grey/dotted blocks keep
+    their button(s) INSIDE the same bordered card when switched from
+    block_blue_cta/block_button via the type dropdown, instead of losing them.
+    Falls back to appending after all paragraphs when the original position
+    wasn't recorded.
+
+    `buttons`, when given, is a list of {'text','url'} dicts rendered in order
+    at btn_position — this is what lets a block carry a second (or third)
+    button. When omitted, behaves exactly as before: a single button built
+    from btn_url/btn_text. Existing single-button call sites are unaffected."""
     btn_style = (
         "background:#E1FB52;color:#000000;padding:12px 50px;border-radius:30px;"
         "text-decoration:none;font-family:roboto,'helvetica neue',helvetica,arial,sans-serif;"
         "font-size:16px;display:inline-block;font-weight:600"
     )
-    btn_div = f'<div align="center" style="padding:10px 0 4px"><a href="{btn_url}" target="_blank" style="{btn_style}">{btn_text}</a></div>'
+    btn_list = buttons if buttons else [{'text': btn_text, 'url': btn_url}]
+    btn_div = '\n'.join(
+        f'<div align="center" style="padding:10px 0 4px"><a href="{b.get("url", "#")}" target="_blank" style="{btn_style}">{b.get("text", "")}</a></div>'
+        for b in btn_list
+    )
     if not paragraphs_html.strip():
         return btn_div
     soup = BeautifulSoup(paragraphs_html, 'html.parser')
@@ -5173,7 +5201,13 @@ def api_assemble_email():
         ph = block.get('paragraphs_html', '')
         btn_text = block.get('btn_text', '')
         btn_url_utm = block.get('btn_url_utm', '#')
-        has_inline_btn = btype in ('block_white', 'block_grey', 'block_dotted') and bool(btn_text) and bool(btn_url_utm) and btn_url_utm != '#'
+        # block.get('buttons') may hold 2+ CTA buttons (same mechanism block_blue_cta
+        # already used) — fall back to the single btn_text/btn_url_utm pair when absent,
+        # so blocks that were never edited through the multi-button UI keep working.
+        raw_buttons = block.get('buttons')
+        candidate_buttons = raw_buttons if isinstance(raw_buttons, list) and raw_buttons else [{'text': btn_text, 'url': btn_url_utm}]
+        valid_inline_buttons = [b for b in candidate_buttons if b.get('text') and b.get('url') and b.get('url') != '#']
+        has_inline_btn = btype in ('block_white', 'block_grey', 'block_dotted') and bool(valid_inline_buttons)
 
         if btype == 'block_blue_cta':
             buttons = block.get('buttons') or [{'text': btn_text, 'url': btn_url_utm}]
@@ -5244,15 +5278,17 @@ def api_assemble_email():
                 + '</table></td></tr>'
             )
         elif btype == 'block_grey':
-            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text) if has_inline_btn else ph
+            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text, buttons=valid_inline_buttons) if has_inline_btn else ph
             row = block_grey(ph2, block.get('image_url', ''))
         elif btype == 'block_dotted':
-            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text) if has_inline_btn else ph
+            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text, buttons=valid_inline_buttons) if has_inline_btn else ph
             row = block_dotted(ph2, block.get('image_url', ''))
         elif btype == 'block_blue_text':
             row = block_blue_text(ph, block.get('image_url', ''))
         elif btype == 'block_button':
-            row = block_button(btn_url_utm, btn_text, ph)
+            # Only pass the multi-button list when there's actually more than one —
+            # keeps the single-button output byte-identical to before this change.
+            row = block_button(btn_url_utm, btn_text, ph, buttons=valid_inline_buttons if len(valid_inline_buttons) > 1 else None)
         elif btype == 'block_spacer':
             row = block_spacer(block.get('height', 20))
         elif btype == 'block_image':
@@ -5270,7 +5306,7 @@ def api_assemble_email():
         elif btype == 'block_3col_text':
             row = block_3col_text(ph, block.get('col2_html', ''), block.get('col3_html', ''))
         elif btype == 'block_white':
-            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text) if has_inline_btn else ph
+            ph2 = _insert_button_in_paragraphs(ph, block.get('btn_position'), btn_url_utm, btn_text, buttons=valid_inline_buttons) if has_inline_btn else ph
             row = block_white(ph2, block.get('image_url', ''))
         else:
             row = block_white(ph, block.get('image_url', ''))

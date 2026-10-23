@@ -545,8 +545,8 @@ function createBlockCard(block, idx, channelKey, total) {
       </div>
       ${textareasHtml}
       ${isCta ? `<div class="btn-edit-fields">
-        <input type="text" class="btn-text-field block-edit-input" placeholder="Текст кнопки">
-        <input type="url" class="btn-url-field block-edit-input" placeholder="URL кнопки (https://...)">
+        <div class="btn-edit-fields-list"></div>
+        <button type="button" class="btn-add-row-btn" onclick="addBlockButtonField('${channelKey}',${idx})">+ Добавить кнопку</button>
       </div>` : ''}
       <div class="block-edit-actions">
         <button class="toolbar-btn primary-btn btn-sm" onclick="saveBlockEdit('${channelKey}',${idx})">Сохранить</button>
@@ -570,14 +570,48 @@ function createBlockCard(block, idx, channelKey, total) {
   if (ta2) ta2.value = paragraphsHtmlToText(block.col2_html || '');
   const ta3 = card.querySelector('.block-edit-col3');
   if (ta3) ta3.value = paragraphsHtmlToText(block.col3_html || '');
-  if (isCta) {
-    const btnTf = card.querySelector('.btn-text-field');
-    const btnUf = card.querySelector('.btn-url-field');
-    if (btnTf) btnTf.value = block.btn_text || '';
-    if (btnUf) btnUf.value = block.btn_url_utm || '';
-  }
+  if (isCta) _populateButtonRows(card, block);
 
   return card;
+}
+
+// Builds one button-edit row (text + url inputs, plus a remove button for
+// every row after the first). Used both for initial render and for restoring
+// the row list on cancel, so the two code paths can never drift apart.
+function _buildButtonRow(text, url, isFirst) {
+  const row = document.createElement('div');
+  row.className = 'btn-edit-row';
+  row.innerHTML = `
+    <input type="text" class="btn-text-field block-edit-input" placeholder="Текст кнопки">
+    <input type="url" class="btn-url-field block-edit-input" placeholder="URL кнопки (https://...)">
+    ${isFirst ? '' : '<button type="button" class="block-ctrl-btn btn-remove-row-btn" title="Удалить кнопку" onclick="this.closest(\'.btn-edit-row\').remove()">✕</button>'}
+  `;
+  row.querySelector('.btn-text-field').value = text || '';
+  row.querySelector('.btn-url-field').value = url || '';
+  return row;
+}
+
+// Rebuilds the full list of button rows for a block card from the block's
+// current state (block.buttons if present, else the legacy single
+// btn_text/btn_url_utm pair). Shared by createBlockCard and cancelBlockEdit
+// so the UI never shows stale rows after a cancel.
+function _populateButtonRows(card, block) {
+  const list = card.querySelector('.btn-edit-fields-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const uiButtons = (Array.isArray(block.buttons) && block.buttons.length)
+    ? block.buttons
+    : [{ text: block.btn_text || '', url: block.btn_url_utm || '' }];
+  uiButtons.forEach((b, i) => list.appendChild(_buildButtonRow(b.text, b.url, i === 0)));
+}
+
+// "+ Добавить кнопку" handler — appends an empty, removable button row.
+function addBlockButtonField(channelKey, idx) {
+  const card = document.getElementById(`blockcard-${channelKey}-${idx}`);
+  if (!card) return;
+  const list = card.querySelector('.btn-edit-fields-list');
+  if (!list) return;
+  list.appendChild(_buildButtonRow('', '', false));
 }
 
 function _captureUiState(channelKey) {
@@ -643,6 +677,10 @@ function _recolorParasForBlueToggle(html, toBlue) {
     : html.replace(/color:#ffffff/g, 'color:#333333').replace(/color:#e1fb52/g, 'color:#1445ea');
 }
 
+// Block styles that can carry a CTA button array rendered INSIDE the card
+// (as opposed to block_button, whose button sits outside any card).
+const _CTA_STYLE_TYPES = ['block_blue_cta', 'block_white', 'block_grey', 'block_dotted'];
+
 function changeBlockType(channelKey, idx, newType) {
   const blocks = emailBlocks[channelKey];
   if (!blocks || !blocks[idx]) return;
@@ -652,6 +690,18 @@ function changeBlockType(channelKey, idx, newType) {
   const willBeBlue = _BLUE_BLOCK_TYPES.includes(newType);
   if (wasBlue !== willBeBlue) {
     block.paragraphs_html = _recolorParasForBlueToggle(block.paragraphs_html, willBeBlue);
+  }
+  // Explicitly carry the button list (and its paragraph position) across a
+  // style switch between blue_cta/white/grey/dotted, so a second button can
+  // never be silently dropped by a future refactor that happens to touch
+  // this function — don't rely on "the field just isn't touched".
+  if (_CTA_STYLE_TYPES.includes(block.type) && _CTA_STYLE_TYPES.includes(newType)) {
+    const preservedButtons = (Array.isArray(block.buttons) && block.buttons.length)
+      ? block.buttons
+      : [{ text: block.btn_text || '', url: block.btn_url_utm || '' }];
+    const preservedPosition = block.btn_position;
+    block.buttons = preservedButtons;
+    block.btn_position = preservedPosition;
   }
   block.type = newType;
   renderBlockEditorForPanel(channelKey);
@@ -811,10 +861,8 @@ function cancelBlockEdit(channelKey, idx) {
     const ta3 = area.querySelector('.block-edit-col3');
     if (ta3) ta3.value = paragraphsHtmlToText(block.col3_html || '');
     if (CTA_BUTTON_BLOCK_TYPES.includes(block.type)) {
-      const btnTf = area.querySelector('.btn-text-field');
-      const btnUf = area.querySelector('.btn-url-field');
-      if (btnTf) btnTf.value = block.btn_text || '';
-      if (btnUf) btnUf.value = block.btn_url_utm || '';
+      const cardEl = area.closest('.block-card');
+      if (cardEl) _populateButtonRows(cardEl, block);
     }
   }
   area.style.display = 'none';
@@ -849,20 +897,32 @@ function saveBlockEdit(channelKey, idx) {
   }
 
   if (CTA_BUTTON_BLOCK_TYPES.includes(block.type)) {
-    const btnTf = area.querySelector('.btn-text-field');
-    const btnUf = area.querySelector('.btn-url-field');
     // Only block_blue_cta/block_button have no independent paragraph preview text —
     // white/grey/dotted keep the paragraph-derived preview set above instead.
     const overwritesPreview = ['block_blue_cta', 'block_button'].includes(block.type);
-    if (btnTf) {
-      block.btn_text = btnTf.value;
-      if (overwritesPreview) block.preview_text = btnTf.value.substring(0, 50);
-    }
-    if (btnUf) {
-      block.btn_url_utm = btnUf.value;
-      if (overwritesPreview) {
-        // Sync buttons array so api_assemble_email uses the updated URL
-        block.buttons = [{ text: block.btn_text || '', url: btnUf.value }];
+    // Sync the WHOLE buttons array from the UI rows (one row per button) instead of
+    // collapsing to a single element — this is what lets a block keep 2+ buttons.
+    const rows = Array.from(area.querySelectorAll('.btn-edit-fields-list .btn-edit-row'));
+    if (rows.length) {
+      const newButtons = rows.map(row => ({
+        text: row.querySelector('.btn-text-field')?.value || '',
+        url: row.querySelector('.btn-url-field')?.value || '',
+      }));
+      block.buttons = newButtons;
+      block.btn_text = newButtons[0].text;
+      block.btn_url_utm = newButtons[0].url;
+      if (overwritesPreview) block.preview_text = (newButtons[0].text || '').substring(0, 50);
+    } else {
+      // Legacy fallback if the row-list markup isn't present for some reason.
+      const btnTf = area.querySelector('.btn-text-field');
+      const btnUf = area.querySelector('.btn-url-field');
+      if (btnTf) {
+        block.btn_text = btnTf.value;
+        if (overwritesPreview) block.preview_text = btnTf.value.substring(0, 50);
+      }
+      if (btnUf) {
+        block.btn_url_utm = btnUf.value;
+        if (overwritesPreview) block.buttons = [{ text: block.btn_text || '', url: btnUf.value }];
       }
     }
   }
