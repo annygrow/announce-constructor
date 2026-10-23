@@ -5459,7 +5459,7 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
         return
 
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
     except ImportError:
         _jobs_write(job_id, status='error', error='Playwright не установлен на сервере')
         return
@@ -5499,6 +5499,17 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
             # so the network never actually goes idle and that wait just times out.
             page.goto(f'{gc_url_base}/notifications/control/mailings/new', wait_until='domcontentloaded', timeout=45000)
             page.wait_for_selector('#Mailing_title', state='visible', timeout=45000)
+
+            def _wait_save_done():
+                # wait_for_load_state('load') here hits the exact same stalled-tracker
+                # problem as the goto above (2026-10-23: several saves timed out on 'load'
+                # even though the page had already fully re-rendered with "Рассылка
+                # сохранена" visible). The success banner is a more reliable — and usually
+                # much faster — signal that the reload actually completed.
+                try:
+                    page.wait_for_selector('.alert-success', state='visible', timeout=45000)
+                except PlaywrightTimeoutError:
+                    page.wait_for_load_state('domcontentloaded', timeout=5000)
 
             page.fill('#Mailing_title', name)
             if sender_name:
@@ -5549,12 +5560,37 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
 
             # Body editor is Summernote; setting via its own API bypasses the
             # WYSIWYG/code-view toggle (which doesn't reliably sync raw HTML back in).
+            # The Summernote plugin binds to #Mailing_content asynchronously *after* the
+            # element is already attached to the DOM — calling .summernote('code', ...)
+            # before that bind finishes is a silent no-op, and GC ends up saving its own
+            # default placeholder instead (seen 2026-10-23: several TG/email drafts saved
+            # with "Здравствуйте, {first_name}" instead of the real body). Wait for the
+            # plugin instance to exist, then read the content back and retry if it didn't
+            # actually take.
             page.wait_for_selector('#Mailing_content', state='attached', timeout=10000)
-            page.evaluate(
-                "(html) => { if (window.jQuery) jQuery('#Mailing_content').summernote('code', html); }",
-                html,
+            page.wait_for_function(
+                "() => window.jQuery && !!jQuery('#Mailing_content').data('summernote')",
+                timeout=15000,
             )
-            page.wait_for_timeout(300)
+            target_text = re.sub(r'<[^>]+>', '', html or '').strip()[:40]
+            for attempt in range(3):
+                page.evaluate(
+                    "(html) => { if (window.jQuery) jQuery('#Mailing_content').summernote('code', html); }",
+                    html,
+                )
+                page.wait_for_timeout(300)
+                current = page.evaluate(
+                    "() => window.jQuery ? jQuery('#Mailing_content').summernote('code') : ''"
+                )
+                current_text = re.sub(r'<[^>]+>', '', current or '').strip()
+                if (not target_text and not current_text) or (target_text and target_text in current_text):
+                    break
+                logging.warning(
+                    f'[GC PW Create] job={job_id} summernote content did not take '
+                    f'(attempt {attempt + 1}/3), retrying'
+                )
+            else:
+                logging.warning(f'[GC PW Create] job={job_id} summernote content still wrong after 3 attempts')
 
             if transport in ('ticket', 'max'):
                 # TG and Max both use select#mailing_bot_id, already defaulted to
@@ -5577,7 +5613,7 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
                 # DOM state until this submits; navigating to the Настройки tab next
                 # would otherwise lose them.
                 page.click('.btn-save-mailing')
-                page.wait_for_load_state('load', timeout=45000)
+                _wait_save_done()
 
                 # Настройки tab (click/auth link wrapping, link preview) is a separate
                 # server-rendered page (part/settings) with its own form. A fresh draft
@@ -5593,7 +5629,7 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
                 )
                 page.wait_for_timeout(300)
                 page.click('.btn-save-mailing')
-                page.wait_for_load_state('load', timeout=45000)
+                _wait_save_done()
             elif transport == 'email':
                 page.wait_for_selector('#Mailing_subject', timeout=10000)
                 page.fill('#Mailing_subject', subject)
@@ -5611,7 +5647,7 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
                 # Click the real save button (.btn-save-mailing) so GC's submit event
                 # handlers (e.g. Select2 serialisation) run — form#yw0.submit() bypasses them.
                 page.click('.btn-save-mailing')
-                page.wait_for_load_state('load', timeout=45000)
+                _wait_save_done()
 
             logging.info(f'[GC PW Create] mailing={mailing_id} transport={transport} name={name!r} saved OK')
             _jobs_write(job_id, status='done', gc_url=gc_url, mailing_id=mailing_id)
