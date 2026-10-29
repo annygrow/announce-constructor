@@ -2931,6 +2931,49 @@ def _strip_first_name(text):
     return text.strip()
 
 
+_P_TAG_RE = re.compile(r'(<p\b[^>]*>)(.*?)(</p>)', re.DOTALL)
+
+def _clean_html_for_channel(html, channel_key):
+    """Apply a channel's GC-variable rules (strip_gc_vars / rename_first_name) to
+    HTML that may already be wrapped in one or more <p style="...">...</p> tags.
+
+    _strip_first_name()'s capitalization only recognizes {first_name} at the true
+    start of a string (optionally after a handful of INLINE tags) — it does not
+    know about a leading <p> wrapper, because at initial parse time (tag_to_email_p)
+    stripping always runs on the bare inner text BEFORE the <p style=...> wrapper is
+    added. Mirroring an already-wrapped block between channels (see
+    /api/channel-clean-html) needs that same inner-text-first order, so this strips
+    each <p>...</p>'s inner content independently rather than the whole string.
+    """
+    ch = CHANNELS.get(channel_key, {})
+    if not html or not (ch.get('strip_gc_vars') or ch.get('rename_first_name')):
+        return html
+
+    def _clean_inner(inner):
+        if ch.get('strip_gc_vars'):
+            inner = _strip_first_name(inner)
+            # Clean up inline HTML tag left with only punctuation after {first_name}
+            # removal: e.g. <b>{first_name}, </b>текст → after strip → <b>, </b>текст → текст
+            inner = re.sub(
+                r'^(\s*<(?:b|i|em|strong|span|u|s)[^>]*>[,!?.;:\s]*</(?:b|i|em|strong|span|u|s)>)+\s*',
+                '', inner
+            )
+            # Capitalize first visible letter, skipping any leading HTML tags
+            inner = re.sub(
+                r'^((?:\s*<[^>]+>)*\s*)([а-яёa-z])',
+                lambda m: m.group(1) + m.group(2).upper(),
+                inner,
+                flags=re.UNICODE
+            )
+        if ch.get('rename_first_name'):
+            inner = inner.replace('{first_name}', '{firstName}')
+        return inner
+
+    if '<p' in html:
+        return _P_TAG_RE.sub(lambda m: m.group(1) + _clean_inner(m.group(2)) + m.group(3), html)
+    return _clean_inner(html)
+
+
 def tag_to_email_p(tag, channel_key='email', campaign='', date='', font_size=18, color='#333333', link_color='#1445ea', segment=''):
     """Convert a single <p> or heading tag to an email <p> with styles."""
     # Fast pre-check: if the tag has no visible text (even with spans/nbsp), skip it
@@ -5333,6 +5376,18 @@ def api_assemble_email():
     )
     html = _disable_text_size_adjust(html)
     return jsonify({'html': html})
+
+
+@app.route('/api/channel-clean-html', methods=['POST'])
+def api_channel_clean_html():
+    """Re-apply a target channel's GC-variable rules (strip_gc_vars /
+    rename_first_name) to a block's raw HTML — used when mirroring a block
+    edit from one email variant to another, so {first_name} doesn't leak
+    into a channel that doesn't support GC merge variables."""
+    data = request.get_json(force=True)
+    html = data.get('html', '') or ''
+    channel_key = data.get('channel_key', '')
+    return jsonify({'html': _clean_html_for_channel(html, channel_key)})
 
 
 @app.route('/api/generate-utm', methods=['POST'])

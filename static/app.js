@@ -24,6 +24,15 @@ let activeChannelKey = 'utm';
 const EMAIL_CHANNELS = ['email', 'email_unisender'];
 const TG_BOTS_CHANNELS = ['tg_bots'];
 
+// One-way block mirroring: edits made in the GC email tab are replicated
+// onto the Unisender tab's block at the same position, so producers don't
+// have to redo every fix twice. Only active while both tabs have the same
+// number of blocks (see _canMirrorToUnisender) — if a producer wrote a
+// genuinely different Unisender copy with a different block count, we
+// don't guess at a mapping, we just warn.
+const UNISENDER_SYNC_SOURCE = 'email';
+const UNISENDER_SYNC_TARGET = 'email_unisender';
+
 const TG_HTML_CHANNELS = [
   'tg_gc', 'tg_voronki', 'pomoshnik',
   'max', 'push', 'tg_channel', 'instagram',
@@ -246,6 +255,8 @@ function rebuildTabBar(data) {
     if (!firstKey) firstKey = key;
   }
 
+  _refreshUnisenderSyncBadge();
+
   if (firstKey) switchTabPanel(firstKey);
   else switchTabPanel('utm');
 }
@@ -301,6 +312,9 @@ function createEmailPanelEl(key, html, blocks) {
       </div>
       <div class="email-right-col">
         <div class="block-editor-title">Блоки письма</div>
+        ${key === UNISENDER_SYNC_TARGET ? `<div class="sync-warning" id="sync-warning-${key}" style="display:none">
+          ⚠ Не синхронизируется с ГК — разное число блоков. Правки нужно перенести вручную.
+        </div>` : ''}
         <div class="block-list" id="blocklist-${key}"></div>
         <div class="block-add-footer">
           <button class="add-block-btn" onclick="showAddBlockForm('${key}')">+ Добавить блок</button>
@@ -649,21 +663,38 @@ function moveBlock(channelKey, idx, dir) {
   if (!blocks) return;
   const to = idx + dir;
   if (to < 0 || to >= blocks.length) return;
+  const mirror = channelKey === UNISENDER_SYNC_SOURCE && _canMirrorToUnisender();
   const state = _captureUiState(channelKey);
   [blocks[idx], blocks[to]] = [blocks[to], blocks[idx]];
   renderBlockEditorForPanel(channelKey);
   reassembleEmail(channelKey);
   _restoreUiState(channelKey, state, i => i === idx ? to : i === to ? idx : i);
+
+  if (mirror) {
+    const dst = emailBlocks[UNISENDER_SYNC_TARGET];
+    [dst[idx], dst[to]] = [dst[to], dst[idx]];
+    renderBlockEditorForPanel(UNISENDER_SYNC_TARGET);
+    reassembleEmail(UNISENDER_SYNC_TARGET);
+  }
+  _refreshUnisenderSyncBadge();
 }
 
 function deleteBlock(channelKey, idx) {
   const blocks = emailBlocks[channelKey];
   if (!blocks) return;
+  const mirror = channelKey === UNISENDER_SYNC_SOURCE && _canMirrorToUnisender();
   const state = _captureUiState(channelKey);
   blocks.splice(idx, 1);
   renderBlockEditorForPanel(channelKey);
   reassembleEmail(channelKey);
   _restoreUiState(channelKey, state, i => i < idx ? i : i + 1);
+
+  if (mirror) {
+    emailBlocks[UNISENDER_SYNC_TARGET].splice(idx, 1);
+    renderBlockEditorForPanel(UNISENDER_SYNC_TARGET);
+    reassembleEmail(UNISENDER_SYNC_TARGET);
+  }
+  _refreshUnisenderSyncBadge();
 }
 
 const _BLUE_BLOCK_TYPES = ['block_blue_cta', 'block_blue_text'];
@@ -684,29 +715,22 @@ const _CTA_STYLE_TYPES = ['block_blue_cta', 'block_white', 'block_grey', 'block_
 function changeBlockType(channelKey, idx, newType) {
   const blocks = emailBlocks[channelKey];
   if (!blocks || !blocks[idx]) return;
+  const mirror = channelKey === UNISENDER_SYNC_SOURCE && _canMirrorToUnisender();
   const state = _captureUiState(channelKey);
-  const block = blocks[idx];
-  const wasBlue = _BLUE_BLOCK_TYPES.includes(block.type);
-  const willBeBlue = _BLUE_BLOCK_TYPES.includes(newType);
-  if (wasBlue !== willBeBlue) {
-    block.paragraphs_html = _recolorParasForBlueToggle(block.paragraphs_html, willBeBlue);
-  }
-  // Explicitly carry the button list (and its paragraph position) across a
-  // style switch between blue_cta/white/grey/dotted, so a second button can
-  // never be silently dropped by a future refactor that happens to touch
-  // this function — don't rely on "the field just isn't touched".
-  if (_CTA_STYLE_TYPES.includes(block.type) && _CTA_STYLE_TYPES.includes(newType)) {
-    const preservedButtons = (Array.isArray(block.buttons) && block.buttons.length)
-      ? block.buttons
-      : [{ text: block.btn_text || '', url: block.btn_url_utm || '' }];
-    const preservedPosition = block.btn_position;
-    block.buttons = preservedButtons;
-    block.btn_position = preservedPosition;
-  }
-  block.type = newType;
+  _applyBlockTypeChange(blocks[idx], newType);
   renderBlockEditorForPanel(channelKey);
   reassembleEmail(channelKey);
   _restoreUiState(channelKey, state);
+
+  if (mirror) {
+    const dstBlock = emailBlocks[UNISENDER_SYNC_TARGET][idx];
+    if (dstBlock) {
+      _applyBlockTypeChange(dstBlock, newType);
+      renderBlockEditorForPanel(UNISENDER_SYNC_TARGET);
+      reassembleEmail(UNISENDER_SYNC_TARGET);
+    }
+  }
+  _refreshUnisenderSyncBadge();
 }
 
 // ---------------------------------------------------------------------------
@@ -810,6 +834,7 @@ function _dndCommit(channelKey) {
   const blocks = emailBlocks[channelKey];
   if (!blocks) return;
 
+  const mirror = channelKey === UNISENDER_SYNC_SOURCE && _canMirrorToUnisender();
   const state = _captureUiState(channelKey);
   const [item] = blocks.splice(from, 1);
   blocks.splice(to, 0, item);
@@ -821,6 +846,15 @@ function _dndCommit(channelKey) {
     if (from > to && i >= to && i < from) return i + 1;
     return i;
   });
+
+  if (mirror) {
+    const dst = emailBlocks[UNISENDER_SYNC_TARGET];
+    const [dstItem] = dst.splice(from, 1);
+    dst.splice(to, 0, dstItem);
+    renderBlockEditorForPanel(UNISENDER_SYNC_TARGET);
+    reassembleEmail(UNISENDER_SYNC_TARGET);
+  }
+  _refreshUnisenderSyncBadge();
 }
 
 function _dndCleanup() {
@@ -934,6 +968,11 @@ function saveBlockEdit(channelKey, idx) {
     if (previewEl) previewEl.textContent = (block.preview_text || '').substring(0, 50);
   }
   reassembleEmail(channelKey);
+
+  if (channelKey === UNISENDER_SYNC_SOURCE && _canMirrorToUnisender()) {
+    _mirrorBlockEditToUnisender(idx, block);
+  }
+  _refreshUnisenderSyncBadge();
 }
 
 function paragraphsHtmlToText(html) {
@@ -1177,6 +1216,8 @@ function addBlock(channelKey) {
     preview_text: (rawText || imgUrl || 'Отступ').substring(0, 80),
   };
 
+  const mirror = channelKey === UNISENDER_SYNC_SOURCE && _canMirrorToUnisender();
+
   if (!emailBlocks[channelKey]) emailBlocks[channelKey] = [];
   emailBlocks[channelKey].push(newBlock);
 
@@ -1185,6 +1226,163 @@ function addBlock(channelKey) {
   renderBlockEditorForPanel(channelKey);
   reassembleEmail(channelKey);
   requestAnimationFrame(() => window.scrollTo(0, savedScrollY));
+
+  if (mirror) _mirrorNewBlockToUnisender(newBlock);
+  _refreshUnisenderSyncBadge();
+}
+
+// ---------------------------------------------------------------------------
+// Mirror ГК email edits → Unisender (one-way, position-matched)
+// ---------------------------------------------------------------------------
+
+// Safe to mirror only while both variants have the same number of blocks —
+// position-matching across genuinely different copy would silently corrupt
+// the Unisender draft. Also drives the warning badge on the Unisender tab.
+// Pure check, no side effects — safe to call before a mutation to decide
+// whether this edit should be mirrored (badge refresh happens separately,
+// after the mutation, so it always reflects the final state).
+function _unisenderCountsMatch() {
+  const src = emailBlocks[UNISENDER_SYNC_SOURCE];
+  const dst = emailBlocks[UNISENDER_SYNC_TARGET];
+  return !!src && !!dst && src.length === dst.length;
+}
+
+// Back-compat alias used at the few call sites that check-and-decide in
+// one step (adding a brand new block, where there's nothing "pre-mutation"
+// to go stale).
+function _canMirrorToUnisender() {
+  return _unisenderCountsMatch();
+}
+
+// Recomputes and shows/hides the Unisender-tab warning badge from the
+// CURRENT block counts. Call this after every block mutation (on either
+// tab), not before — calling it before a mutation bakes in a now-stale
+// answer, e.g. "still mismatched" right after the edit that just fixed it.
+function _refreshUnisenderSyncBadge() {
+  if (!emailBlocks[UNISENDER_SYNC_SOURCE] || !emailBlocks[UNISENDER_SYNC_TARGET]) return;
+  _setUnisenderSyncWarning(!_unisenderCountsMatch());
+}
+
+function _setUnisenderSyncWarning(show) {
+  const el = document.getElementById(`sync-warning-${UNISENDER_SYNC_TARGET}`);
+  if (el) el.style.display = show ? 'flex' : 'none';
+}
+
+// Cleans a block's HTML for the Unisender channel's GC-variable rules
+// (currently strips {first_name}) via the same server-side logic used
+// at initial parse time, so a mirrored edit can't leak GC merge vars.
+async function _cleanHtmlForUnisender(html) {
+  if (!html) return html;
+  try {
+    const resp = await fetch('/api/channel-clean-html', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ html, channel_key: UNISENDER_SYNC_TARGET }),
+    });
+    const data = await resp.json();
+    return data.html ?? html;
+  } catch (_) {
+    return html;
+  }
+}
+
+// Re-tags a button URL's utm_medium etc. for the Unisender channel,
+// reusing the existing per-channel UTM generator so a mirrored button
+// doesn't silently misattribute Unisender clicks as GC email clicks.
+async function _retagUrlForUnisender(url) {
+  if (!url || url === '#') return url;
+  const campaign = document.getElementById('utmCampaign')?.value.trim() || '';
+  const date = document.getElementById('utmDate')?.value.trim() || '';
+  const segment = parsedData?.segment || '';
+  try {
+    const resp = await fetch('/api/generate-utm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, campaign, date, segment }),
+    });
+    const data = await resp.json();
+    return data?.[UNISENDER_SYNC_TARGET]?.url || url;
+  } catch (_) {
+    return url;
+  }
+}
+
+// Clones a GC block's content fields into a Unisender-safe version:
+// GC vars stripped from text, button URLs re-tagged with the right medium.
+async function _buildMirroredBlock(sourceBlock) {
+  const clone = JSON.parse(JSON.stringify(sourceBlock));
+  clone.paragraphs_html = await _cleanHtmlForUnisender(clone.paragraphs_html || '');
+  if (clone.col2_html) clone.col2_html = await _cleanHtmlForUnisender(clone.col2_html);
+  if (clone.col3_html) clone.col3_html = await _cleanHtmlForUnisender(clone.col3_html);
+  if (clone.btn_url_utm) clone.btn_url_utm = await _retagUrlForUnisender(clone.btn_url_utm);
+  if (Array.isArray(clone.buttons)) {
+    for (const b of clone.buttons) b.url = await _retagUrlForUnisender(b.url);
+  }
+  return clone;
+}
+
+async function _mirrorNewBlockToUnisender(sourceBlock) {
+  const dst = emailBlocks[UNISENDER_SYNC_TARGET];
+  if (!dst) return;
+  const mirrored = await _buildMirroredBlock(sourceBlock);
+  dst.push(mirrored);
+  renderBlockEditorForPanel(UNISENDER_SYNC_TARGET);
+  reassembleEmail(UNISENDER_SYNC_TARGET);
+  _refreshUnisenderSyncBadge();
+}
+
+// Mirrors a saveBlockEdit() text/button change onto the Unisender block at
+// the same position. Re-checks the length match after the UTM round-trip
+// in case the block counts changed while that request was in flight.
+async function _mirrorBlockEditToUnisender(idx, sourceBlock) {
+  const dstBlocks = emailBlocks[UNISENDER_SYNC_TARGET];
+  const dstBlock = dstBlocks && dstBlocks[idx];
+  if (!dstBlock) return;
+  const mirrored = await _buildMirroredBlock(sourceBlock);
+
+  if (emailBlocks[UNISENDER_SYNC_SOURCE].length !== dstBlocks.length) {
+    _setUnisenderSyncWarning(true);
+    return;
+  }
+
+  dstBlock.paragraphs_html = mirrored.paragraphs_html;
+  dstBlock.col2_html = mirrored.col2_html;
+  dstBlock.col3_html = mirrored.col3_html;
+  dstBlock.preview_text = sourceBlock.preview_text;
+  if (Array.isArray(mirrored.buttons) && mirrored.buttons.length) {
+    dstBlock.buttons = mirrored.buttons;
+    dstBlock.btn_text = mirrored.buttons[0].text;
+    dstBlock.btn_url_utm = mirrored.buttons[0].url;
+  } else {
+    dstBlock.btn_text = mirrored.btn_text;
+    dstBlock.btn_url_utm = mirrored.btn_url_utm;
+  }
+
+  const state = _captureUiState(UNISENDER_SYNC_TARGET);
+  renderBlockEditorForPanel(UNISENDER_SYNC_TARGET);
+  reassembleEmail(UNISENDER_SYNC_TARGET);
+  _restoreUiState(UNISENDER_SYNC_TARGET, state);
+  _refreshUnisenderSyncBadge();
+}
+
+// Applies a block-type change (style switch, recolor, button-position
+// carry) to a single block object — shared by changeBlockType() for the
+// source block and its Unisender mirror, so the two never drift.
+function _applyBlockTypeChange(block, newType) {
+  const wasBlue = _BLUE_BLOCK_TYPES.includes(block.type);
+  const willBeBlue = _BLUE_BLOCK_TYPES.includes(newType);
+  if (wasBlue !== willBeBlue) {
+    block.paragraphs_html = _recolorParasForBlueToggle(block.paragraphs_html, willBeBlue);
+  }
+  if (_CTA_STYLE_TYPES.includes(block.type) && _CTA_STYLE_TYPES.includes(newType)) {
+    const preservedButtons = (Array.isArray(block.buttons) && block.buttons.length)
+      ? block.buttons
+      : [{ text: block.btn_text || '', url: block.btn_url_utm || '' }];
+    const preservedPosition = block.btn_position;
+    block.buttons = preservedButtons;
+    block.btn_position = preservedPosition;
+  }
+  block.type = newType;
 }
 
 // ---------------------------------------------------------------------------
