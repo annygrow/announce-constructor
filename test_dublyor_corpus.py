@@ -572,6 +572,46 @@ parse_case('bug47', 'Unrelated bold phrase sharing CSS class with repeated CTA p
     _check_bug47)
 
 
+header_case('bug51a', 'Reverse email label must precede generic one-click metadata skip',
+    '<p>в 1 клик (почта)</p>', 'email_section')
+header_case('bug51b', 'General email variant label opens a separate email section',
+    '<p><span><br/></span><span>общий (почта)</span></p>', 'email_section')
+header_case('bug51c', 'Generic one-click metadata remains skipped',
+    '<p>в 1 клик</p>', 'skip')
+header_case('bug51d', 'Body mention of a variant label is not a section',
+    '<p>Выберите вариант общий (почта) для отправки.</p>', None)
+
+
+def _check_email_variant_split(parsed):
+    variants = parsed.get('email_variants') or []
+    if len(variants) != 2:
+        return False, f'expected two email variants, got {len(variants)}'
+    gc, uni = (v['html'] for v in variants)
+    ok = ('GC_ONLY' in gc and 'UNI_ONLY' not in gc
+          and 'UNI_ONLY' in uni and 'GC_ONLY' not in uni
+          and '(почта)' not in gc + uni
+          and parsed['email_html'] == gc
+          and 'TG_ONLY' in parsed['tg_html'])
+    return ok, f'email separation or TG preservation failed: {variants!r}'
+
+
+parse_case('bug51e', 'Reverse email labels separate content and preserve TG',
+    '<p>4. Контент письма</p><p>в 1 клик (почта)</p>'
+    '<p>Тема: Проверка</p><table><tr><td>GC_ONLY</td></tr></table>'
+    '<p>общий (почта)</p><p>Тема: Проверка</p><p>UNI_ONLY</p>'
+    '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
+
+parse_case('bug51f', 'Merged reverse email labels preserve both adjacent bodies',
+    '<p>в 1 клик (почта)<br><br>GC_ONLY</p>'
+    '<p>GC_END<br><span>общий (почта)</span><br><span>UNI_ONLY</span></p>'
+    '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
+
+parse_case('bug51g', 'Reverse source order still routes one-click email to GC',
+    '<p>общий (почта)</p><p>UNI_ONLY</p>'
+    '<p>в 1 клик (почта)</p><p>GC_ONLY</p>'
+    '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
+
+
 def run():
     passed, failed = 0, 0
     for cid, desc, kind, payload, check in CASES:

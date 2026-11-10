@@ -1039,6 +1039,13 @@ OTHER_SRC_LABEL_KW = ['другие источники', 'другие кана�
                       'др источники', 'для др. источников', 'другой ист', 'другие ист',
                       'письмо в юнисендер', 'письмо для юнисендера', 'письмо юнисендер']
 
+# Explicit email variant labels with the channel AFTER the variant name.
+# Keep this anchored to avoid treating ordinary body mentions as dividers.
+EMAIL_VARIANT_LABEL_RE = re.compile(
+    r'^(?:в\s+(?:1|один)\s+клик|общий|общее)\s*\(\s*почта\s*\)\s*:?\s*$',
+    re.IGNORECASE,
+)
+
 def is_section_header(tag, ai_hints=None):
     """
     Returns the section key if this tag is a section divider, else None.
@@ -1066,6 +1073,17 @@ def is_section_header(tag, ai_hints=None):
     text = re.sub(r'\s+:', ':', text)
     if not text:
         return None
+
+    # Check before the generic "в 1 клик" metadata skip rule. Also recognize a
+    # label on the first <br>-separated line when Docs merges it with content.
+    first_line = next((line.strip() for line in tag.get_text('', strip=False).replace('\xa0', ' ').splitlines()
+                       if line.strip()), '')
+    if tag.find('br'):
+        lines = re.split(r'<br\s*/?>', tag.decode_contents(), flags=re.IGNORECASE)
+        first_line = next((line_text for line in lines
+                           if (line_text := BeautifulSoup(line, 'html.parser').get_text('').replace('\xa0', ' ').strip())), '')
+    if EMAIL_VARIANT_LABEL_RE.fullmatch(first_line):
+        return 'email_section'
 
     # "БОТ (1 клик)", "БОТ (общий)" etc. — unambiguous TG section headers.
     if re.match(r'^бот\s*\(', text) and len(text) <= 40:
@@ -1508,7 +1526,8 @@ def _get_trailing_email_label(tag):
             for c in candidate_children
         ).strip()
         text_lower = text.lower()
-        if not any(text_lower.startswith(kw) for kw in other_src_kw):
+        if not (EMAIL_VARIANT_LABEL_RE.fullmatch(text)
+                or any(text_lower.startswith(kw) for kw in other_src_kw)):
             return None
         # Label must be short (it's a heading, not body content)
         if len(text) > 60:
@@ -2355,6 +2374,8 @@ def parse_doc_html(html_content, ai_hints=None):
                         child_lower = child_text.lower()
                         is_numbered_heading = bool(re.match(r'^\d+[.)]\s', child_lower))
                         is_known_label = (
+                            bool(EMAIL_VARIANT_LABEL_RE.fullmatch(child_text))
+                            or
                             # Cyrillic spellings of "email" producers actually use (2026-09-25)
                             child_lower in ('почта', 'письмо', 'email', 'емейл', 'емаил', 'емайл', 'имейл')
                             or child_lower.startswith((
