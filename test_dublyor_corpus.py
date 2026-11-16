@@ -612,6 +612,78 @@ parse_case('bug51g', 'Reverse source order still routes one-click email to GC',
     '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
 
 
+# New producer labels must not trigger the whole-document fallback.
+for suffix, label, expected in [
+    ('a', 'Для email', 'email_section'),
+    ('b', 'ДЛЯ E-MAIL:', 'email_section'),
+    ('c', 'Для ботов', 'tg_section'),
+    ('d', 'Для бота:', 'tg_section'),
+    ('e', 'Материалы для email помогут в работе.', None),
+    ('f', 'Для ботов подготовили новый текст.', None),
+]:
+    header_case('bug52' + suffix, 'Exact producer channel labels: ' + label,
+                '<p>' + label + '</p>', expected)
+
+
+def _check_producer_labels(parsed):
+    email, tg = parsed['email_html'], parsed['tg_html']
+    ok = ('EMAIL_ONLY' in email and 'TG_ONLY' not in email
+          and 'TG_ONLY' in tg and 'EMAIL_ONLY' not in tg
+          and all(x not in email + tg for x in ('CONFIG_ONLY', 'Для email', 'Для ботов'))
+          and parsed['subject'] == 'Проверка'
+          and parsed['preview'] == 'Анонс'
+          and '<strong>EMAIL_ONLY</strong>' in email
+          and '<b>TG_ONLY</b>' in tg)
+    return ok, f'email={email!r}, tg={tg!r}, subject={parsed["subject"]!r}'
+
+
+_producer_metadata = '<ul><li>CONFIG_ONLY</li></ul><table><tr><td>CONFIG_ONLY</td></tr></table>'
+parse_case('bug52g', 'New producer headings isolate email and bots from config tables',
+    _producer_metadata + '<p>Для email</p><p>Тема: Проверка</p><p>Прехедер: Анонс</p>'
+    '<table><tr><td><strong>EMAIL_ONLY</strong></td></tr></table>'
+    '<p>Для ботов</p><p><b>TG_ONLY</b></p>', _check_producer_labels)
+parse_case('bug52h', 'Merged labels and metadata preserve formatted bodies',
+    _producer_metadata + '<p><span>Для e</span><span>mail<br><br>Тема: Проверка<br>'
+    'Прехедер: Анонс<br></span><span><strong>EMAIL_ONLY</strong></span></p>'
+    '<p><span>Для бо</span><span>тов<br><br><b>TG_ONLY</b></span></p>',
+    _check_producer_labels)
+parse_case('bug52i', 'New labels mid-paragraph separate adjacent channel bodies',
+    _producer_metadata + '<p>Для email</p><p>Тема: Проверка</p><p>Прехедер: Анонс</p>'
+    '<p><strong>EMAIL_ONLY</strong><br><span>Для ботов</span><br><b>TG_ONLY</b></p>',
+    _check_producer_labels)
+parse_case('bug52j', 'Email label after bot content opens an independent email section',
+    _producer_metadata + '<p>Для ботов</p><p><b>TG_ONLY</b><br>Для email<br>'
+    '<strong>EMAIL_ONLY</strong></p><p>Тема: Проверка</p><p>Прехедер: Анонс</p>',
+    _check_producer_labels)
+
+
+def _check_bot_source_spacing(mod_):
+    parsed = mod_.parse_doc_html(_doc(
+        '<p>Для email</p><p>EMAIL_ONE</p><p>EMAIL_TWO</p>'
+        '<p>Для ботов</p><p><b>Заголовок</b></p><p>Вступление</p>'
+        '<p><span>&nbsp;</span></p>'
+        '<p><b>1. Первый</b> пункт</p><p>2. Второй пункт</p><p>3. Третий пункт</p>'
+        '<p><br></p><p>Цены:</p><p>Курс А</p><p>Курс Б</p>'
+        '<p></p><p><a href="https://example.com/lesson">Записаться</a></p>'
+    ))
+    html = mod_.generate_tg_html(parsed['tg_html'], 'tg_gc', 'camp', '01.01.26')
+    bots = mod_.generate_tg_bots(parsed['tg_html'], 'tg_voronki', 'camp', '01.01.26')
+    ok = ('<b>Заголовок</b><br>Вступление' in html
+          and '<b>1. Первый</b> пункт<br>2. Второй пункт<br>3. Третий пункт' in html
+          and 'Цены:<br>Курс А<br>Курс Б' in html
+          and 'Вступление</p>\n<p>&nbsp;</p>\n<p><b>1.' in html
+          and '<b>1. Первый</b> пункт\n2. Второй пункт\n3. Третий пункт' in bots
+          and 'Вступление\n\n<b>1.' in bots
+          and 'Цены:\nКурс А\nКурс Б\n\n<a href=' in bots
+          and 'example.com/lesson?' in html and 'example.com/lesson?' in bots
+          and '<p>EMAIL_ONE</p>\n<p>EMAIL_TWO</p>' == parsed['email_html'])
+    return ok, f'html={html!r}, bots={bots!r}'
+
+
+custom_case('bug53', 'Bot paragraphs keep source lines, blank gaps, bold and CTA links',
+            _check_bot_source_spacing)
+
+
 def run():
     passed, failed = 0, 0
     for cid, desc, kind, payload, check in CASES:

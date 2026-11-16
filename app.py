@@ -273,7 +273,7 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 ‼️ ИСКЛЮЧЕНИЕ из правила "1 клик": если заголовок содержит явные TG/бот-индикаторы ("бот", "тг", "telegram", "max", "ботов") — это TG-секция (tg_main), даже если в заголовке упоминается "1 клик", "с 1 кликом", "без 1 клика". Примеры TG-секций: "Сообщение для ботов ТГ и Макс с 1 кликом", "Сообщение для ботов ТГ и Макс без 1 клика" → tg_main.
 
 Примеры заголовков → email_gc: "Почта (1 клик)", "Email (1 клик)", "Емейл (1 клик)", "В 1 клик", "Контент письма (1 клик)"
-Также в email_gc идут секции с заголовками: "контент письма", "текст письма", "почта:", "e-mail:", "письмо:", "для почты", "email:", "емейл:", "емаил:", "емайл:", "имейл:" (все варианты написания "email" кириллицей)
+Также в email_gc идут секции с заголовками: "контент письма", "текст письма", "почта:", "e-mail:", "письмо:", "для почты", "для email", "для e-mail", "email:", "емейл:", "емаил:", "емайл:", "имейл:" (все варианты написания "email" кириллицей)
 
 Эта секция содержит переменные {first_name}, {offer_url_...} и т.п. — сохранять нетронутыми.
 
@@ -288,7 +288,7 @@ _AI_SYSTEM_PROMPT = """Ты — помощник, который разбира�
 
 **TG — ОСНОВНОЙ** (поле "tg_main"):
 Секции с заголовком "телеграм", "telegram", "тг", "tg", "max", "телеграм/max", "тг/max" и т.п.
-Также: "ТГ бот (ГК)", "ТГ бот", "ТГ бот ГК", "бот тг", "тг-бот", "для бота тг", "tg bot" и любые похожие варианты.
+Также: "ТГ бот (ГК)", "ТГ бот", "ТГ бот ГК", "бот тг", "тг-бот", "для бота тг", "для ботов", "для бота", "tg bot" и любые похожие варианты.
 ‼️ ВАЖНО: заголовок TG-секции может стоять в ОДНОМ АБЗАЦЕ с первой строкой контента (слитый параграф). Пример: "ТГ бот (ГК)Соберем видео-завод в прямом эфире..." — здесь "ТГ бот (ГК)" это заголовок секции, а не начало контента. Распознавай первую часть такого абзаца как заголовок, в section_headers верни его точный текст.
 Это основной текст для ТГ бот ГК и Max. Если такой секции нет — вернуть null (не копировать email_gc).
 
@@ -1046,6 +1046,25 @@ EMAIL_VARIANT_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Producer-facing channel labels; full matches avoid cutting ordinary sentences.
+EMAIL_FOR_LABEL_RE = re.compile(
+    r'для\s+(?:e-?mail|почты|емейл|емаил|емайл|имейл)\s*:?\s*', re.IGNORECASE,
+)
+TG_FOR_LABEL_RE = re.compile(r'для\s+бот(?:а|ов)\s*:?\s*', re.IGNORECASE)
+
+
+def _first_logical_line(tag):
+    # Preserve words split across styling spans and honor actual <br> boundaries.
+    parts = []
+    for node in tag.descendants:
+        if getattr(node, 'name', None) == 'br':
+            if ''.join(parts).strip():
+                break
+        elif isinstance(node, NavigableString):
+            parts.append(str(node))
+    return ' '.join(''.join(parts).replace('\xa0', ' ').split())
+
+
 def is_section_header(tag, ai_hints=None):
     """
     Returns the section key if this tag is a section divider, else None.
@@ -1084,6 +1103,10 @@ def is_section_header(tag, ai_hints=None):
                            if (line_text := BeautifulSoup(line, 'html.parser').get_text('').replace('\xa0', ' ').strip())), '')
     if EMAIL_VARIANT_LABEL_RE.fullmatch(first_line):
         return 'email_section'
+    if EMAIL_FOR_LABEL_RE.fullmatch(_first_logical_line(tag)):
+        return 'email_section'
+    if TG_FOR_LABEL_RE.fullmatch(_first_logical_line(tag)):
+        return 'tg_section'
 
     # "БОТ (1 клик)", "БОТ (общий)" etc. — unambiguous TG section headers.
     if re.match(r'^бот\s*\(', text) and len(text) <= 40:
@@ -1527,6 +1550,7 @@ def _get_trailing_email_label(tag):
         ).strip()
         text_lower = text.lower()
         if not (EMAIL_VARIANT_LABEL_RE.fullmatch(text)
+                or EMAIL_FOR_LABEL_RE.fullmatch(text)
                 or any(text_lower.startswith(kw) for kw in other_src_kw)):
             return None
         # Label must be short (it's a heading, not body content)
@@ -1554,6 +1578,8 @@ def _get_trailing_tg_label(tag):
             for c in candidate_children
         ).strip()
         text_lower = text.lower()
+        if TG_FOR_LABEL_RE.fullmatch(text):
+            return text
         # "Бот (общий)" style, or "<label> (бот)" style (e.g. "в 1 клик (бот)",
         # "общий (бот)") — see matching case in is_section_header().
         if re.match(r'^бот\s*\(', text_lower) or re.search(r'\(\s*бот\s*\)', text_lower):
@@ -2289,6 +2315,29 @@ def parse_doc_html(html_content, ai_hints=None):
 
         section_type = is_section_header(tag, ai_hints=ai_hints)
 
+        # These exact labels can share a paragraph with the first body lines.
+        # Remove only the label up to its first <br>, retaining nested formatting.
+        label = _first_logical_line(tag)
+        if (section_type in ('email_section', 'tg_section')
+                and (EMAIL_FOR_LABEL_RE.fullmatch(label) or TG_FOR_LABEL_RE.fullmatch(label))):
+            subsections = email_subsections if section_type == 'email_section' else tg_subsections
+            subsections.append({'name': label, 'blocks': []})
+            current_section = section_type
+            if tag.find('br'):
+                remainder = BeautifulSoup(str(tag), 'lxml').find(tag.name)
+                seen_label = False
+                for node in list(remainder.descendants):
+                    if isinstance(node, NavigableString):
+                        seen_label = seen_label or bool(str(node).strip())
+                        node.extract()
+                    elif getattr(node, 'name', None) == 'br':
+                        node.extract()
+                        if seen_label:
+                            break
+                if get_text_content(remainder).strip() or remainder.find('img'):
+                    process_block(remainder)
+            return
+
         if section_type == 'skip':
             raw_text = get_text_content(tag).strip()
             # Same text, but joined with an empty separator between spans instead of a
@@ -2584,14 +2633,37 @@ def parse_doc_html(html_content, ai_hints=None):
     walk_blocks(body)
 
     # Build HTML strings for each section
-    def tags_to_html(tags):
+    def tags_to_html(tags, compact_paragraphs=False):
         parts = []
+        paragraph_run = []
+
+        def flush_paragraphs():
+            if paragraph_run:
+                # Docs uses separate <p>s even for consecutive lines. Only an
+                # empty source paragraph marks a blank line in bot messages.
+                parts.append('<p>' + '<br>'.join(paragraph_run) + '</p>')
+                paragraph_run.clear()
+
         for t in tags:
             # Replace non-breaking spaces before checking emptiness —
             # Google Docs often exports empty paragraphs as <p><span>&nbsp;</span></p>
             txt = t.get_text(strip=True).replace('\xa0', '').strip()
-            if txt or t.name in ('ul', 'ol', 'table') or t.find('img'):
+            has_content = txt or t.name in ('ul', 'ol', 'table') or t.find('img')
+            if compact_paragraphs:
+                if has_content and t.name == 'p':
+                    # Retain paragraph-level formatting when moving its children
+                    # into a shared paragraph (inline_gdoc_formatting resolves CSS).
+                    wrapper = BeautifulSoup('<span></span>', 'lxml').span
+                    wrapper.attrs = dict(t.attrs)
+                    source_copy = BeautifulSoup(str(t), 'lxml').find('p')
+                    for child in list(source_copy.contents):
+                        wrapper.append(child.extract())
+                    paragraph_run.append(str(wrapper))
+                    continue
+                flush_paragraphs()
+            if has_content:
                 parts.append(str(t))
+        flush_paragraphs()
         return '\n'.join(parts)
 
     # Build email variants
@@ -2626,7 +2698,7 @@ def parse_doc_html(html_content, ai_hints=None):
     # Build TG variants
     tg_variant_list = []
     for sub in tg_subsections:
-        html = tags_to_html(sub['blocks'])
+        html = tags_to_html(sub['blocks'], compact_paragraphs=True)
         if html:
             tg_variant_list.append({'name': sub['name'], 'html': html})
 
