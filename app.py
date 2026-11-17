@@ -1042,7 +1042,7 @@ OTHER_SRC_LABEL_KW = ['другие источники', 'другие кана�
 # Explicit email variant labels with the channel AFTER the variant name.
 # Keep this anchored to avoid treating ordinary body mentions as dividers.
 EMAIL_VARIANT_LABEL_RE = re.compile(
-    r'^(?:в\s+(?:1|один)\s+клик|общий|общее)\s*\(\s*почта\s*\)\s*:?\s*$',
+    r'^(?:в\s+(?:1|один)\s+клик|общий|общее|общая)\s*\(\s*почта\s*\)\s*:?\s*$',
     re.IGNORECASE,
 )
 

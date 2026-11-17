@@ -684,6 +684,27 @@ custom_case('bug53', 'Bot paragraphs keep source lines, blank gaps, bold and CTA
             _check_bot_source_spacing)
 
 
+header_case('bug54a', 'Feminine general email label opens a separate section',
+    '<p><span>общая (почта)</span></p>', 'email_section')
+header_case('bug54b', 'Body mention of feminine email label stays content',
+    '<p>Выберите вариант общая (почта) для отправки.</p>', None)
+
+parse_case('bug54c', 'Feminine email label separates GC and Unisender bodies',
+    '<p>в 1 клик (почта)</p><p>GC_ONLY</p>'
+    '<p><span>общая (почта)</span></p><p>Тема: Проверка</p><p>UNI_ONLY</p>'
+    '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
+
+parse_case('bug54d', 'Merged feminine email label preserves both adjacent bodies',
+    '<p>в 1 клик (почта)<br><br>GC_ONLY</p>'
+    '<p>GC_END<br><span>общая (почта)</span><br><span>UNI_ONLY</span></p>'
+    '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
+
+parse_case('bug54e', 'Leading merged feminine label preserves new email content',
+    '<p>в 1 клик (почта)</p><p>GC_ONLY</p>'
+    '<p><span>ОБЩАЯ ( ПОЧТА ):</span><br><span>UNI_ONLY</span></p>'
+    '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
+
+
 def run():
     passed, failed = 0, 0
     for cid, desc, kind, payload, check in CASES:
