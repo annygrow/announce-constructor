@@ -2633,7 +2633,7 @@ def parse_doc_html(html_content, ai_hints=None):
     walk_blocks(body)
 
     # Build HTML strings for each section
-    def tags_to_html(tags, compact_paragraphs=False):
+    def tags_to_html(tags, compact_paragraphs=False, preserve_separators=False):
         parts = []
         paragraph_run = []
 
@@ -2663,13 +2663,17 @@ def parse_doc_html(html_content, ai_hints=None):
                 flush_paragraphs()
             if has_content:
                 parts.append(str(t))
+            elif preserve_separators and t.name == 'p' and parts and parts[-1] != '<p></p>':
+                # Empty source paragraphs separate email blocks. Dropping them
+                # merges every paragraph and CTA into a single blue card.
+                parts.append('<p></p>')
         flush_paragraphs()
         return '\n'.join(parts)
 
     # Build email variants
     email_variant_list = []
     for sub in email_subsections:
-        html = tags_to_html(sub['blocks'])
+        html = tags_to_html(sub['blocks'], preserve_separators=True)
         if html:
             email_variant_list.append({'name': sub['name'], 'html': html})
 
@@ -2811,6 +2815,20 @@ def parse_doc_html(html_content, ai_hints=None):
         m2 = re.match(r'^дата\s+отправки\s*[:\s]\s*(.+)', item, re.IGNORECASE)
         if m2 and not doc_date:
             doc_date = _norm_date(m2.group(1).strip())
+
+    # Additional labeled format; existing campaign/activity labels retain priority.
+    # Project tags are deliberately excluded: they are not UTM campaign labels.
+    if not doc_campaign:
+        for item in all_items:
+            m = re.match(r'^(?:технический\s+)?тег\s+акции\s*:\s*(.+)', item, re.IGNORECASE)
+            if m:
+                val = re.split(
+                    r'\s*(?:дата\s+отправки|время\s+отправки|тег\s+проекта|активность)\s*:',
+                    m.group(1), maxsplit=1, flags=re.IGNORECASE
+                )[0].strip()
+                if val:
+                    doc_campaign = val
+                    break
 
     # Pass 2: if still missing, use positional heuristic (Format 2)
     # Google Docs sometimes exports the bullet list as plain <p> paragraphs with a

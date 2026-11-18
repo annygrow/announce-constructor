@@ -705,6 +705,42 @@ parse_case('bug54e', 'Leading merged feminine label preserves new email content'
     '<p>в 1 клик (бот)</p><p>TG_ONLY</p>', _check_email_variant_split)
 
 
+for _cid, _planning, _expected in [
+    ('bug55a', '<p>Тег проекта: #project</p><p>Технический тег акции: bf-2026</p>', 'bf-2026'),
+    ('bug55b', '<p>Тег акции: bf-2026</p>', 'bf-2026'),
+    ('bug55c', '<p>Тег акции: new</p><p>Тег активности: original</p>', 'original'),
+    ('bug55d', '<p>Тег акции: new</p><p>Кампания: original</p>', 'original'),
+    ('bug55e', '<p>Тег проекта: #project</p><p>• legacy-campaign</p>', 'legacy-campaign'),
+    ('bug55f', '<p>Тег проекта: #project</p>', ''),
+    ('bug55g', '<p>Тег акции: bf-2026<br>Дата отправки: 19.11.2026</p>', 'bf-2026'),
+]:
+    parse_case(_cid, 'Campaign aliases preserve existing labels and positional tags',
+               _planning + '<p>Почта</p><p>BODY</p>',
+               lambda p, expected=_expected: (p['doc_campaign'] == expected,
+                                              f'campaign={p["doc_campaign"]!r}, expected={expected!r}'))
+
+
+def _check_email_blank_boundaries(mod_):
+    parsed = mod_.parse_doc_html(_doc(
+        '<p>Почта</p><p><b>FIRST</b></p><p><span>&nbsp;</span></p>'
+        '<p>SECOND</p><p><a href="https://example.com/one">[CTA_ONE]</a></p>'
+        '<p><br></p><p></p><p>BETWEEN</p><p></p><p>THIRD</p>'
+        '<p><a href="https://example.com/two">[CTA_TWO]</a></p>'
+        '<p>БОТ</p><p>BOT_ONLY</p>'))
+    html, blocks, _ = mod_.generate_email_html(parsed['email_html'], 'email', 'camp', '19.11.26', [])
+    content = [b for b in blocks if b['type'] != 'block_spacer']
+    texts = [BeautifulSoup(b.get('paragraphs_html', ''), 'lxml').get_text() for b in content]
+    buttons = [b.get('btn_text') for b in content if b.get('btn_text')]
+    ok = (len(content) == 4 and texts == ['FIRST', 'SECOND', 'BETWEEN', 'THIRD']
+          and buttons == ['CTA_ONE', 'CTA_TWO'] and '<b>FIRST</b>' in html
+          and 'utm_campaign=camp' in html and 'BOT_ONLY' not in html)
+    return ok, f'texts={texts!r}, buttons={buttons!r}, blocks={len(content)}'
+
+
+custom_case('bug56', 'Source blank paragraphs keep email blocks and CTA positions separate',
+            _check_email_blank_boundaries)
+
+
 def run():
     passed, failed = 0, 0
     for cid, desc, kind, payload, check in CASES:
