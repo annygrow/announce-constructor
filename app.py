@@ -2178,11 +2178,12 @@ def parse_doc_html(html_content, ai_hints=None):
     current_section = 'other'
     subject = ''
     preview = ''
+    pending_preview = False  # standalone label; value is in the next paragraph
     sender = ''
     doc_campaign_found = ''  # captured from "Кампания: slug" meta line (skipped tag)
 
     def process_block(tag):
-        nonlocal current_section, subject, preview, sender, doc_campaign_found
+        nonlocal current_section, subject, preview, sender, doc_campaign_found, pending_preview
 
         def _route(t):
             """Add a content tag to whichever section is currently open."""
@@ -2275,6 +2276,28 @@ def parse_doc_html(html_content, ai_hints=None):
             for child in to_remove:
                 child.extract()
             return bool(get_text_content(tag_copy).strip())
+
+        # Docs can put "Прехедер" (with or without a colon) and its value
+        # in separate paragraphs. Consume only the next short text paragraph;
+        # a new section, image or table must end this pending metadata field.
+        if current_section != 'tg_section':
+            meta_text = ' '.join(tag.get_text('').replace('\xa0', ' ').split())
+            has_media = tag.name == 'table' or tag.find(['img', 'table']) is not None
+            if pending_preview:
+                if not meta_text and not has_media:
+                    return
+                pending_preview = False
+                if (meta_text and len(meta_text) <= 250 and not has_media
+                        and tag.name in ('p', 'li')
+                        and is_section_header(tag, ai_hints=ai_hints) is None):
+                    if not preview:
+                        preview = meta_text
+                    return
+            if not has_media and re.fullmatch(
+                    r'(?:прехедер|прехендер|прехэдер|превью|preview|preheader)\s*:?',
+                    meta_text, re.IGNORECASE):
+                pending_preview = True
+                return
 
         # Handle merged paragraph: body content + section label (e.g. "Другие источники")
         # in the same <p>, separated by <br/> tags.  Split them before any other detection

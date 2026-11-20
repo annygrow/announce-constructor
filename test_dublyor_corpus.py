@@ -741,6 +741,36 @@ custom_case('bug56', 'Source blank paragraphs keep email blocks and CTA position
             _check_email_blank_boundaries)
 
 
+def _check_split_preheader(parsed):
+    emails = [parsed['email_html']] + [v['html'] for v in parsed.get('email_variants') or []]
+    ok = (parsed['preview'] == 'Короткий анонс.'
+          and all('Короткий анонс.' not in h and 'Прехедер' not in h for h in emails)
+          and 'BODY_ONE' in emails[0]
+          and any('BODY_TWO' in h for h in emails)
+          and '<img' in emails[0]
+          and 'Прехедер' in parsed['tg_html'] and 'BOT_PREVIEW' in parsed['tg_html'])
+    return ok, f'preview={parsed["preview"]!r}, emails={emails!r}'
+
+
+for _suffix, _label in [('a', 'Прехедер'), ('b', 'Прехедер:')]:
+    parse_case('bug57' + _suffix, 'Standalone preheader label consumes next paragraph in both emails',
+        '<p>Email (1 клик)</p><p>Тема: Тест</p>'
+        f'<p><b>{_label}</b></p><p></p><p><b><i>Короткий анонс.</i></b></p>'
+        '<p><img src="https://example.com/banner.png"></p><p>BODY_ONE</p>'
+        f'<p>Email (общий)</p><p>{_label}</p><p>Короткий анонс.</p><p>BODY_TWO</p>'
+        '<p>БОТ</p><p>Прехедер</p><p>BOT_PREVIEW</p>', _check_split_preheader)
+
+
+parse_case('bug57c', 'Empty preheader does not consume the next section',
+    '<p>Почта</p><p>Прехедер</p><p>БОТ</p><p>BOT_BODY</p>',
+    lambda p: (p['preview'] == '' and 'BOT_BODY' in p['tg_html'], repr(p['preview'])))
+
+parse_case('bug57d', 'Empty preheader does not consume a banner or following body',
+    '<p>Почта</p><p>Прехедер</p><p><img src="https://example.com/banner.png"></p><p>BODY</p>',
+    lambda p: (p['preview'] == '' and '<img' in p['email_html'] and 'BODY' in p['email_html'],
+               repr(p['preview'])))
+
+
 def run():
     passed, failed = 0, 0
     for cid, desc, kind, payload, check in CASES:
