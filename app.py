@@ -5615,6 +5615,23 @@ def _gc_attach_image_via_playwright(page, image_url):
             pass
 
 
+def _gc_route_editor_request(route):
+    # These marketing scripts/pixels are present in the account's admin pages.
+    # Telegram's editor initializes on window.load, so a stalled tracking request
+    # prevents Summernote from starting even after DOMContentLoaded has fired.
+    # Keep all GC/editor/file requests going through the existing guard proxy.
+    tracking_domains = (
+        'mc.yandex.ru', 'mc.yandex.com', 'top-fwz1.mail.ru',
+        'webecyzo.com', 'static.indoleads.com', '0gs25f.ru',
+        'api.flocktory.com', 'getloo.ru', 'kurzemnek.ru',
+    )
+    host = (urlparse(route.request.url).hostname or '').lower()
+    if any(host == domain or host.endswith('.' + domain) for domain in tracking_domains):
+        route.abort()
+    else:
+        route.continue_()
+
+
 def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender_name=None, tags=None, image_url=None, preheader=None):
     """Create a GC mailing draft end-to-end via our own Playwright session:
     open the "new mailing" form, fill name/category/transport, submit to get an id,
@@ -5654,6 +5671,7 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
         # (see agent_guard/README.md, section 2, вариант А).
         ctx = browser.new_context(viewport={'width': 1280, 'height': 900}, ignore_https_errors=True)
         ctx.add_cookies(pw_cookies)
+        ctx.route('**/*', _gc_route_editor_request)
         page = ctx.new_page()
         try:
             # wait_until='load' waits for every subresource — including the page's own
@@ -5738,7 +5756,7 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
             page.wait_for_selector('#Mailing_content', state='attached', timeout=10000)
             page.wait_for_function(
                 "() => window.jQuery && !!jQuery('#Mailing_content').data('summernote')",
-                timeout=15000,
+                timeout=45000,
             )
             target_text = re.sub(r'<[^>]+>', '', html or '').strip()[:40]
             for attempt in range(3):
