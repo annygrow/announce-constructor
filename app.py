@@ -5694,7 +5694,9 @@ def _gc_create_mailing_playwright(job_id, name, subject, html, transport, sender
             page.wait_for_timeout(500)
 
             page.get_by_role('button', name='Создать рассылку').click()
-            page.wait_for_url(re.compile(r'/mailings/update/id/\d+'), timeout=45000)
+            # Like the initial goto, wait only for the document: the new draft can
+            # already be editable while a tracker/image keeps its load event pending.
+            page.wait_for_url(re.compile(r'/mailings/update/id/\d+'), wait_until='domcontentloaded', timeout=45000)
 
             m = re.search(r'/mailings/update/id/(\d+)', page.url)
             if not m:
